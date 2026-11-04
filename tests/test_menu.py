@@ -25,16 +25,16 @@ class MenuTest(unittest.TestCase):
             self.assertIn(title, out)
 
     def test_still_unimplemented_stubs_print_placeholder(self):
-        # Reconnaissance (2), Scanning (3) and Gaining Access (4) are now
-        # real submenus, covered by their own test files; 1/5/6 are still
-        # bare stubs.
-        for key in ("1", "5", "6"):
+        # General Task (1), Reconnaissance (2), Scanning (3) and Gaining
+        # Access (4) are now real submenus, covered by their own test
+        # files; 5/6 are still bare stubs.
+        for key in ("5", "6"):
             mod = main.MENU[key]
             out = run_with([key, "0"])
             self.assertIn(f"[{mod.TITLE}] not implemented yet.", out)
 
     def test_submenu_phases_open_their_submenu(self):
-        for key in ("2", "3", "4"):
+        for key in ("1", "2", "3", "4"):
             mod = main.MENU[key]
             out = run_with([key, "0", "0"])
             self.assertIn(f"== {mod.TITLE} ==", out)

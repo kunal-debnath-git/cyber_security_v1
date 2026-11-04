@@ -1,15 +1,20 @@
 # Pending — coding & testing backlog
 
-Open items for this project, as of commit `3361f54`. These are things
+Open items for this project, as of commit `08955bd`. These are things
 I'd like to build or revisit next; none are started yet unless noted.
 
-## 1. General Task (menu option 1)
+**Standing instruction:** README.md, menu-tree.md and this file get
+updated together with every feature change, not just when asked.
 
-Still an undefined stub (`phases/general_task.py`). Needs a decision on
-what it should do before I can build or test it. No proposal from me
-here — this one is entirely open.
+## ~~General Task (menu option 1)~~ — done
 
-## 2. Maintaining Access (menu option 5)
+Implemented in `phases/general_task.py`: update system & tools, system/
+network info report, listening ports, file hash calculator, MAC
+viewer/randomizer, service start/stop, session activity log. See
+README.md and menu-tree.md for details. Tests in
+`tests/test_general_task.py` (41/41 total passing).
+
+## 1. Maintaining Access (menu option 5)
 
 Currently a stub. The original phase table lists "Installing rootkits,
 Creating hidden user accounts, Tunneling" as its techniques. I stopped
@@ -31,7 +36,7 @@ anything:**
 
 Needs your go-ahead before I write it.
 
-## 3. Clearing Tracks (menu option 6)
+## 2. Clearing Tracks (menu option 6)
 
 Currently a stub. The phase table lists "Modifying log files, Deleting
 evidence of unauthorized access." I haven't attempted this one yet.
@@ -45,7 +50,7 @@ evidence of unauthorized access." I haven't attempted this one yet.
 I'd lean toward the read-only version or leaving it as a stub, not an
 actual log-modification/deletion feature, even gated — needs your call.
 
-## 4. Smaller follow-ups (lower priority, not blocking)
+## 3. Smaller follow-ups (lower priority, not blocking)
 
 - `phases/gaining_access.py`'s SQL injection probe is a simple
   error-string check only (no boolean-based/time-based detection). Fine

@@ -10,7 +10,7 @@ No GUI, no web interface — menu only.
 
 | # | Menu item          | Status                                   |
 |---|---------------------|-------------------------------------------|
-| 1 | General Task        | stub (not yet defined)                     |
+| 1 | General Task        | **implemented** — update, info report, ports, hashing, MAC tools, services, activity log |
 | 2 | Reconnaissance      | **implemented** — WHOIS, DNS enum, dork builder |
 | 3 | Scanning            | **implemented** — host discovery, port scan, vuln scan (nmap) |
 | 4 | Gaining Access      | **implemented** — SQLi probe, buffer overflow fuzzer, phishing *template provisioning only* |
@@ -36,7 +36,7 @@ main.py                   menu loop (options 1-6, 0 = Exit)
 utils.py                  shared helpers: run external tools safely,
                            yes/no confirm prompt, text prompt
 phases/
-  general_task.py         1. General Task (stub)
+  general_task.py         1. General Task (update / info / ports / hash / MAC / services / log)
   reconnaissance.py       2. Reconnaissance (WHOIS / DNS / dork builder)
   scanning.py             3. Scanning (nmap: discovery / ports / vuln)
   gaining_access.py       4. Gaining Access (SQLi probe / BOF fuzzer / phishing templates)
@@ -56,6 +56,18 @@ The five implemented/planned phases and the techniques each maps to:
 | Gaining Access | Attempting to exploit identified vulnerabilities to gain unauthorized access. | SQL injection, Buffer overflow attacks, Phishing attacks |
 | Maintaining Access | Establishing a persistent connection to assess duration of undetected access. | Installing rootkits, Creating hidden user accounts, Tunneling |
 | Clearing Tracks | Removing traces of activity from system logs. | Modifying log files, Deleting evidence of unauthorized access |
+
+## General Task (option 1)
+
+Kali housekeeping utilities, not tied to a target:
+
+1. Update system & tools (`apt update`, then confirm before `apt upgrade -y`)
+2. System & network info report (hostname, kernel, uptime, disk, interfaces)
+3. Listening ports & active connections (`ss -tulpn`, falls back to `netstat`)
+4. File hash calculator (MD5/SHA1/SHA256, stdlib `hashlib`)
+5. MAC address viewer / randomizer (`ip link`, optional `macchanger -r`)
+6. Start/stop key services — `postgresql` (Metasploit DB), `ssh` (confirm first)
+7. Session activity log — appends a timestamped note to `activity.log`
 
 ## Authorization
 
