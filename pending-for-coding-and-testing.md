@@ -3,8 +3,9 @@
 Open items for this project, as of commit `8950ae4`. These are things
 I'd like to build or revisit next; none are started yet unless noted.
 
-**Standing instruction:** README.md, menu-tree.md and this file get
-updated together with every feature change, not just when asked.
+**Standing instruction:** README.md, menu-tree.md,
+export-import.md and this file get updated together with every
+feature change, not just when asked.
 
 ## ~~General Task (menu option 1)~~ — done
 

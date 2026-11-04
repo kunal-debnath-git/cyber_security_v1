@@ -29,6 +29,13 @@ python3 main.py
 python3 -m unittest discover -s tests -v
 ```
 
+## Moving this to Kali-in-Termux
+
+Working environment is Kali Linux via Termux on Android. See
+`export-import.md` for the export/import/test/validate steps and
+known Termux/proot-distro caveats (no systemd, no root for raw
+sockets, etc.).
+
 ## Layout
 
 ```
