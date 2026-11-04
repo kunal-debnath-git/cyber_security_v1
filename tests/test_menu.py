@@ -24,10 +24,19 @@ class MenuTest(unittest.TestCase):
                       "Clearing Tracks", "0. Exit"]:
             self.assertIn(title, out)
 
-    def test_each_option_runs_its_stub(self):
-        for key, mod in main.MENU.items():
+    def test_still_unimplemented_stubs_print_placeholder(self):
+        # Reconnaissance (2) and Scanning (3) are now real submenus and are
+        # covered by their own test files; the rest are still bare stubs.
+        for key in ("1", "4", "5", "6"):
+            mod = main.MENU[key]
             out = run_with([key, "0"])
             self.assertIn(f"[{mod.TITLE}] not implemented yet.", out)
+
+    def test_reconnaissance_and_scanning_open_their_submenu(self):
+        for key in ("2", "3"):
+            mod = main.MENU[key]
+            out = run_with([key, "0", "0"])
+            self.assertIn(f"== {mod.TITLE} ==", out)
 
     def test_invalid_option(self):
         self.assertIn("Invalid option", run_with(["9", "abc", "0"]))

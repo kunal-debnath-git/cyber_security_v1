@@ -42,7 +42,7 @@ def run_menu(input_fn=input):
         if mod is None:
             print("Invalid option, try again.")
             continue
-        mod.run()
+        mod.run(input_fn=input_fn)
 
 
 if __name__ == "__main__":
