@@ -30,6 +30,13 @@ python3 main.py
 python3 -m unittest discover -s tests -v
 ```
 
+## Working on this with Claude Code
+
+`.claude/skills/cyber-security-v1/SKILL.md` is a project-orientation
+skill: structure, menu status, safety posture, and the standing
+workflow rules in one place, for picking this project back up without
+re-deriving them each session.
+
 ## Moving this to Kali-in-Termux
 
 Working environment is Kali Linux via Termux on Android. See
