@@ -1,6 +1,6 @@
 # Pending — coding & testing backlog
 
-Open items for this project, as of commit `08955bd`. These are things
+Open items for this project, as of commit `8950ae4`. These are things
 I'd like to build or revisit next; none are started yet unless noted.
 
 **Standing instruction:** README.md, menu-tree.md and this file get
@@ -61,9 +61,11 @@ actual log-modification/deletion feature, even gated — needs your call.
 - No `requirements.txt`/packaging — intentional, since the project is
   stdlib-only by design; flag if that changes.
 - Scope/authorization prompts (`utils.confirm`) are not logged
-  anywhere (no audit trail of what was confirmed/run). Could add a
-  simple local log file if you want a record of what was run against
-  what, under what confirmation.
+  automatically anywhere. General Task > Session activity log
+  (`activity.log`) covers manual notes you type in, but nothing writes
+  to it on its own — a y/n confirm in Scanning/Gaining Access doesn't
+  auto-record itself. Could wire that up if you want every confirmed
+  run captured without typing a note each time.
 
 ## How to use this file
 

@@ -1,6 +1,6 @@
 # Menu tree — where we are
 
-Current structure of the CLI (`main.py`), as of commit `08955bd`.
+Current structure of the CLI (`main.py`), as of commit `8950ae4`.
 Legend: ✅ built & tested · 🟡 proposed, not yet built · ⬜ stub / undecided
 
 ```

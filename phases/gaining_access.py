@@ -150,7 +150,7 @@ def buffer_overflow_fuzz(input_fn=input):
 
 
 def phishing_provision(input_fn=input):
-    print(f"\n-- Phishing: provision only, nothing is sent --")
+    print("\n-- Phishing: provision only, nothing is sent --")
     print(
         "This writes local template files for an internal security-awareness "
         "exercise. It does not send email and does not contact any server.\n"

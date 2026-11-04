@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""CLI menu entry point (v1 skeleton). Python 3 stdlib only, Kali friendly."""
+"""CLI menu entry point. Python 3 stdlib only, Kali friendly.
+
+Options 1-4 (General Task, Reconnaissance, Scanning, Gaining Access)
+are implemented; 5-6 (Maintaining Access, Clearing Tracks) are stubs
+pending a scope decision - see pending-for-coding-and-testing.md.
+"""
 
 from phases import (
     general_task,

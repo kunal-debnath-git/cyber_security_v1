@@ -99,3 +99,17 @@ than crashing if absent):
 - `dig` — DNS enumeration (falls back to Python's `socket` for an A
   record if `dig` isn't installed)
 - `nmap` — host discovery, port scanning, vulnerability scanning
+- `apt` — Update system & tools (standard on Kali/Debian-based systems)
+- `ip` — system/network info report, MAC address viewer (falls back to
+  Python's `socket` for the local IP if `ip` isn't installed)
+- `ss` — listening ports (falls back to `netstat` if `ss` isn't installed)
+- `macchanger` — MAC address randomization (viewing MACs works without it)
+- `systemctl` — starting/stopping the `postgresql`/`ssh` services
+- `uptime` — shown in the system/network info report (skipped if absent)
+
+File hashing (MD5/SHA1/SHA256) needs no external tool — it uses
+Python's stdlib `hashlib`.
+
+Generated at runtime, not part of the source (ignored by git):
+`activity.log` (Session activity log notes), `phishing_templates/`
+(Phishing provision-only output).
