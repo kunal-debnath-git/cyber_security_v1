@@ -1,6 +1,6 @@
 # Menu tree — where we are
 
-Current structure of the CLI (`main.py`), as of commit `8950ae4`.
+Current structure of the CLI (`main.py`), as of commit `2c5ad6c`.
 Legend: ✅ built & tested · 🟡 proposed, not yet built · ⬜ stub / undecided
 
 ```
@@ -31,10 +31,8 @@ Cyber Security Toolkit v1
 ├── 4. Gaining Access                                 ✅ implemented
 │     (phases/gaining_access.py — target + y/n auth confirm)
 │     ├── 1. SQL injection test (error-based probe)    ✅
-│     ├── 2. Buffer overflow fuzzing (TCP)             ✅
-│     └── 3. Phishing attacks                          ✅ provision-only
-│            (writes local email + mock login-page templates;
-│             never sends anything, never contacts a server)
+│     └── 2. Buffer overflow fuzzing (TCP)             ✅
+│            (Phishing moved out to 7. Social Engineering — see below)
 │
 ├── 5. Maintaining Access                             ⬜ stub
 │     (phases/maintaining_access.py — not built)
@@ -50,6 +48,18 @@ Cyber Security Toolkit v1
 │     Proposed narrower option, awaiting your go-ahead:
 │     └── 1. Read-only log review (tail/grep, no modify/delete) 🟡
 │
+├── 7. Social Engineering                             ✅ implemented
+│     (phases/social_engineering.py — local only, no target, no auth
+│      prompt; everything is provision-only, see README.md)
+│     Modeled on SET's menu structure + Zphisher's multi-template idea,
+│     minus their live/attacking components.
+│     ├── 1. Spear-phishing email template (4 templates)       ✅
+│     ├── 2. Mock landing/login page (4 page styles)            ✅
+│     ├── 3. Pretexting / vishing call script (3 scenarios)     ✅
+│     ├── 4. USB-drop awareness briefing (no payload generated) ✅
+│     ├── 5. QR code generator (for a URL you supply)           ✅
+│     └── 6. Campaign log (tagged entry in activity.log)        ✅
+│
 └── 0. Exit                                           ✅
 ```
 
@@ -63,9 +73,10 @@ Cyber Security Toolkit v1
 | 4. Gaining Access | ✅ done | `tests/test_gaining_access.py` |
 | 5. Maintaining Access | not built — narrower proposal pending | — |
 | 6. Clearing Tracks | not built — narrower proposal pending | — |
+| 7. Social Engineering | ✅ done | `tests/test_social_engineering.py` |
 | Menu loop itself | ✅ done | `tests/test_menu.py` |
 
-41/41 tests passing as of the last push. See
+54/54 tests passing as of the last push. See
 `pending-for-coding-and-testing.md` for the full backlog and open
 decisions behind each 🟡/⬜ item above.
 

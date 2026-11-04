@@ -13,6 +13,7 @@ from phases import (
     gaining_access,
     maintaining_access,
     clearing_tracks,
+    social_engineering,
 )
 
 MENU = {
@@ -22,6 +23,7 @@ MENU = {
     "4": gaining_access,
     "5": maintaining_access,
     "6": clearing_tracks,
+    "7": social_engineering,
 }
 
 

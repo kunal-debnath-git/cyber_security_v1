@@ -16,9 +16,8 @@ import os
 import platform
 import shutil
 import socket
-from datetime import datetime, timezone
 
-from utils import confirm, prompt, run_cmd, tool_available
+from utils import append_timestamped_log, confirm, prompt, run_cmd, tool_available
 
 TITLE = "General Task"
 
@@ -173,13 +172,9 @@ def session_activity_log(input_fn=input):
     if not note:
         print("Empty note, nothing logged.")
         return
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    line = f"{timestamp} {note}\n"
-    try:
-        with open(ACTIVITY_LOG_PATH, "a", encoding="utf-8") as fh:
-            fh.write(line)
-    except OSError as exc:
-        print(f"Could not write to '{ACTIVITY_LOG_PATH}': {exc}")
+    line = append_timestamped_log(ACTIVITY_LOG_PATH, note)
+    if line is None:
+        print(f"Could not write to '{ACTIVITY_LOG_PATH}'.")
         return
     print(f"Logged to {ACTIVITY_LOG_PATH}: {line.strip()}")
 

@@ -1,20 +1,16 @@
 """Gaining Access phase.
 
-Techniques Used: SQL injection, Buffer overflow attacks, Phishing attacks.
+Techniques Used: SQL injection, Buffer overflow attacks.
+
+(Phishing attacks moved to its own "Social Engineering" top-level menu
+- see phases/social_engineering.py - alongside the other social-
+engineering techniques it was grouped with there.)
 
 No lab/VM is available for this project (per project decision) - these
 tools take a target at run time, same as Scanning, and require the same
 y/n authorization confirmation before sending anything.
-
-Phishing attacks is intentionally a *provision, do not test* feature:
-it only generates local template files (an email template and a mock
-login-page HTML) and a short awareness write-up. It never sends email,
-never contacts a real server, and is meant for internal security-
-awareness material you review before using it, not for running against
-anyone.
 """
 
-import os
 import socket
 import urllib.error
 import urllib.parse
@@ -149,72 +145,9 @@ def buffer_overflow_fuzz(input_fn=input):
     print("Reached max length without a dropped connection.")
 
 
-def phishing_provision(input_fn=input):
-    print("\n-- Phishing: provision only, nothing is sent --")
-    print(
-        "This writes local template files for an internal security-awareness "
-        "exercise. It does not send email and does not contact any server.\n"
-    )
-    org = prompt("Organization/brand name for the template (default 'Acme Corp'): ",
-                 input_fn=input_fn, default="Acme Corp")
-    out_dir = prompt("Output directory (default './phishing_templates'): ",
-                     input_fn=input_fn, default="./phishing_templates")
-
-    os.makedirs(out_dir, exist_ok=True)
-
-    email_path = os.path.join(out_dir, "awareness_email_template.txt")
-    with open(email_path, "w", encoding="utf-8") as fh:
-        fh.write(
-            f"Subject: Action required - verify your {org} account\n\n"
-            f"Hi {{{{first_name}}}},\n\n"
-            f"We noticed unusual sign-in activity on your {org} account. "
-            f"Please verify your identity using the secure link below within "
-            f"24 hours, or your access will be suspended.\n\n"
-            f"[VERIFY MY ACCOUNT]({{{{tracking_link}}}})\n\n"
-            f"{org} IT Security Team\n\n"
-            f"--- FOR INTERNAL AWARENESS USE ONLY. Do not send to real "
-            f"recipients without a documented, authorized campaign. ---\n"
-        )
-
-    page_path = os.path.join(out_dir, "awareness_login_mock.html")
-    with open(page_path, "w", encoding="utf-8") as fh:
-        fh.write(
-            "<!doctype html><html><head><title>"
-            f"{org} Sign in (AWARENESS MOCK - NOT FOR REAL USE)</title></head>\n"
-            "<body style=\"font-family:sans-serif;max-width:360px;margin:60px auto;\">\n"
-            f"<h2>{org} Sign in</h2>\n"
-            "<p style=\"color:red;font-weight:bold;\">INTERNAL AWARENESS MOCK "
-            "- do not deploy publicly or collect real credentials.</p>\n"
-            "<form onsubmit=\"return false;\">\n"
-            "  <input placeholder=\"Email\"><br><br>\n"
-            "  <input placeholder=\"Password\" type=\"password\"><br><br>\n"
-            "  <button type=\"submit\">Sign in</button>\n"
-            "</form>\n</body></html>\n"
-        )
-
-    report_path = os.path.join(out_dir, "awareness_notes.md")
-    with open(report_path, "w", encoding="utf-8") as fh:
-        fh.write(
-            "# Phishing awareness materials - internal use only\n\n"
-            f"Generated for: {org}\n\n"
-            "These files are templates for a documented, authorized internal "
-            "security-awareness exercise (e.g. run by your security team with "
-            "HR/legal sign-off). They are **not configured to send anything** "
-            "and **not configured to collect anything** - the mock login page "
-            "has no backend and the email template has no mail transport "
-            "wired up. Do not add real sending/collection logic and point it "
-            "at real people without that authorization in place.\n"
-        )
-
-    print(f"Wrote: {email_path}")
-    print(f"Wrote: {page_path}")
-    print(f"Wrote: {report_path}")
-
-
 SUBMENU = {
     "1": ("SQL injection test (error-based probe)", sql_injection_test),
     "2": ("Buffer overflow fuzzing", buffer_overflow_fuzz),
-    "3": ("Phishing attacks (provision templates only, no sending)", phishing_provision),
 }
 
 

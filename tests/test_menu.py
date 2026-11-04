@@ -21,7 +21,7 @@ class MenuTest(unittest.TestCase):
         out = run_with(["0"])
         for title in ["General Task", "Reconnaissance", "Scanning",
                       "Gaining Access", "Maintaining Access",
-                      "Clearing Tracks", "0. Exit"]:
+                      "Clearing Tracks", "Social Engineering", "0. Exit"]:
             self.assertIn(title, out)
 
     def test_still_unimplemented_stubs_print_placeholder(self):
@@ -34,7 +34,7 @@ class MenuTest(unittest.TestCase):
             self.assertIn(f"[{mod.TITLE}] not implemented yet.", out)
 
     def test_submenu_phases_open_their_submenu(self):
-        for key in ("1", "2", "3", "4"):
+        for key in ("1", "2", "3", "4", "7"):
             mod = main.MENU[key]
             out = run_with([key, "0", "0"])
             self.assertIn(f"== {mod.TITLE} ==", out)
