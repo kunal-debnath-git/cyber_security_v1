@@ -1,0 +1,432 @@
+================================================================================
+GITHUB DEEP SCAN: OPEN-SOURCE BUILDING BLOCKS FOR AN
+AUTOMATED REEL / SHORT VIDEO CONTENT-GENERATION PIPELINE
+================================================================================
+Date of scan   : 2026-11-05
+Scope          : Content GENERATION only (topic -> script -> voiceover ->
+                 visuals -> captions -> rendered video). Auto-posting /
+                 scheduling to platforms was explicitly OUT of scope.
+Target stack   : Python + FastAPI backend
+Target formats : Instagram Reels, YouTube Shorts (vertical 9:16)
+Method         : 4 parallel research passes via `gh` CLI GitHub search
+                 (sorted by stars, filtered for recency) + web
+                 cross-checks, each layer of the pipeline scanned
+                 separately, then consolidated below.
+
+================================================================================
+TL;DR / TOP RECOMMENDATION
+================================================================================
+Use harry0703/MoneyPrinterTurbo as your primary reference architecture.
+It is the single repo that shows up as the #1 or #2 pick in EVERY category
+below (full pipeline, script-gen, TTS, assembly, captions). It already runs
+as a FastAPI backend (uvicorn, /docs Swagger) behind a separate Streamlit
+UI, with the pipeline logic cleanly separated into app/services/*.
+
+  Repo : https://github.com/harry0703/MoneyPrinterTurbo
+  Stars: 139k   | Lang: Python | License: MIT | Last push: 2026-11-05 (today)
+  Why  : Topic -> script (OpenAI/Claude/Gemini/DeepSeek/Qwen/Ollama/etc.)
+         -> TTS (many providers incl. free Edge-TTS/Kokoro)
+         -> stock/AI visuals (Pexels/Pixabay/Coverr or paid gen)
+         -> captions -> moviepy/ffmpeg render.
+  Plan : Don't `pip install` it (it's an app, not a package) - clone it,
+         read app/services/task.py for the pipeline shape, and lift/adapt
+         the modules you need (script-gen, TTS wrapper, caption burner)
+         directly into your own FastAPI service.
+
+Secondary reference (cleaner microservice boundary, but stale ~16mo and
+not Python): gyoridavid/short-video-maker - already a REST+MCP API
+server (TTS+captions+stock footage), callable over HTTP from your FastAPI
+app if you'd rather keep rendering in a separate polyglot service and only
+own the script-writing LLM call yourself.
+
+================================================================================
+1. END-TO-END / FULL-PIPELINE GENERATORS
+================================================================================
+Ranked by overall fit (not just stars).
+
+1) harry0703/MoneyPrinterTurbo            139k*  Python MIT   last push: today
+   Full topic->script->TTS->visuals->captions->render. Already FastAPI.
+   Fit: EASY (lift modules into your own service).
+   Caveat: large/complex codebase, many optional paid-provider integrations
+   to prune; mixed EN/Chinese docs.
+
+2) Chamanrajragu/purffle-shorts            61*   Python MIT   last push: 3d ago
+   Topic/URL/Reddit->script (OpenAI/Claude/Gemini/Ollama)->free TTS->
+   stock/AI footage->word-synced captions. True pip-installable library;
+   also exposes an MCP server.
+   Fit: EASY-MODERATE, pure Python, importable.
+   Caveat: FLAG - bundles auto-upload/scheduling to YouTube/TikTok/
+   Instagram. Strip that module (out of scope here, and ToS risk if kept).
+   Very young project (61 stars), unproven at scale.
+
+3) gyoridavid/short-video-maker            1.5k* TypeScript MIT  last push: ~16mo (STALE)
+   Text->Kokoro TTS->Whisper captions->Pexels background video. Purpose-
+   built REST + MCP API server, Dockerized, no paid keys needed.
+   Fit: MODERATE - not Python, call it as an HTTP microservice from FastAPI.
+   Caveat: no commits in ~16 months (abandonment risk); English-only voice;
+   doesn't generate the script itself (you supply the text).
+
+4) FujiwaraChoki/MoneyPrinter              14.1k* Python MIT  last push: ~7mo
+   Ollama-first script/metadata gen, refactored into API+worker+Postgres
+   queue architecture (maps well to FastAPI+queue design).
+   Fit: MODERATE - tightly coupled to its own Docker/Postgres stack.
+   Caveat: FLAG - scrapes a TikTok session cookie to auto-upload
+   (unofficial, ToS risk). Strip it.
+
+5) RayVentura/ShortGPT                    8.1k*  Python MIT  last push: ~21mo (STALE/ABANDONED)
+   Pioneering "AI framework" - literally a ShortGPT library class for
+   script/voice/assets/editing.
+   Fit: EASY in theory (designed as a library) but deps (yt-dlp, edge-tts)
+   likely broken after 21 months untouched.
+   Caveat: use only as an architecture/pattern reference, not production.
+
+6) SamurAIGPT/AI-Faceless-Video-Generator  530*   Python/Colab MIT  last push: ~1.5mo
+   Topic->GPT script->gTTS voice->SadTalker talking-avatar animation.
+   Fit: MODERATE/HARD - Colab-notebook-first; SadTalker needs a real GPU
+   worker, not a simple endpoint wrap.
+   Caveat: produces a talking-head avatar, not pure b-roll "faceless"
+   style despite the name; GPU infra cost.
+
+7) drawcall/FFAIVideo                      184*   TypeScript(Node) MIT  last push: ~4.5mo
+   LLM script->TTS->assembly, explicitly inspired by MoneyPrinter/Turbo.
+   Fit: MODERATE - wrap as subprocess/HTTP microservice, not Python-native.
+   Caveat: small community, thinner docs.
+
+SCOPE-MISMATCH (found, but NOT what you want - excluded from ranking):
+ - mutonby/openshorts (7.5k*, active, Python/MIT, API+MCP) and
+   Anil-matcha/AI-Youtube-Shorts-Generator (5.8k*, active) both clip
+   EXISTING long-form video into shorts (OpusClip-style) rather than
+   generating a new video from a topic. openshorts does have a secondary
+   "AI Shorts with AI actors" module that's closer to in-scope if you want
+   to dig further.
+ - alamshafil/auto-shorts - archived/abandoned.
+
+================================================================================
+2. SCRIPT / IDEA / HOOK GENERATION (LLM layer)
+================================================================================
+(Subset of candidates above, evaluated specifically for the script-writing
+ piece.)
+
+ Name                          Stars  Last push   Fit for FastAPI
+ ------------------------------------------------------------------------
+ MoneyPrinterTurbo             139k   today       BEST - cleanly separable
+                                                   script-gen service,
+                                                   multi-LLM support.
+ purffle-shorts                61     3d ago      Good architecture
+                                                   reference (pip package).
+ MoneyPrinter (FujiwaraChoki)  14.1k  ~7mo         Flask-based logic, easy
+                                                   to port to async FastAPI.
+ ShortGPT                      8.1k   ~21mo STALE  Read for prompt-
+                                                   engineering ideas only.
+ AI-Youtube-Shorts-Generator   5.8k   ~2d ago      Different use case
+                                                   (highlight extraction
+                                                   from existing video, not
+                                                   script-from-topic) -
+                                                   only relevant if you add
+                                                   a "clip existing video"
+                                                   feature later.
+
+No dependency needed here beyond your own LLM client (OpenAI/Anthropic/
+Ollama SDK) - the value of these repos is their PROMPT DESIGN and pipeline
+shape, not a library to import.
+
+================================================================================
+3. TEXT-TO-SPEECH (TTS / narration)
+================================================================================
+ Name                    Stars        Last push        License    Fit
+ --------------------------------------------------------------------------
+ rhasspy/piper            11.3k       Aug 2025 (stale)  MIT        EASY -
+   + active fork           6.2k       Nov 2026 (active) GPL-3.0*   pip install
+   OHF-Voice/piper1-gpl                                            piper-tts,
+                                                                     CPU-only,
+                                                                     sub-second,
+                                                                     no network.
+   *check GPL-3.0 copyleft acceptability for your backend if using the fork.
+
+ rany2/edge-tts            12.5k      Oct 2026          Unofficial EASY - native
+                                                                     asyncio, no
+                                                                     API key, BUT
+                                                                     unofficial/
+                                                                     reverse-
+                                                                     engineered
+                                                                     MS Edge API -
+                                                                     no SLA, could
+                                                                     break/throttle.
+
+ coqui-ai/TTS              46.2k      Aug 2024 (stale,  MPL-2.0    MODERATE -
+                                        org defunct;                XTTS-v2 voice
+                                        community forks                cloning,
+                                        keep it alive)               wants a GPU,
+                                                                     load model
+                                                                     once at
+                                                                     startup.
+
+ k2-fsa/sherpa-onnx        15.7k      Nov 2026          Apache-2.0 MODERATE -
+                                                                     offline ASR+
+                                                                     TTS+VAD via
+                                                                     ONNX, CPU-
+                                                                     friendly, more
+                                                                     setup.
+
+ suno-ai/bark              39.3k      Aug 2024 (stale)  MIT        HARD - needs
+                                                                     GPU, slow,
+                                                                     poor word-
+                                                                     timing control
+                                                                     (bad for
+                                                                     karaoke-caption
+                                                                     sync).
+
+RECOMMENDATION: Piper (or its GPL fork) as cheap/fast/local default;
+edge-tts as a free quality upgrade if the "unofficial API" risk is
+acceptable; Coqui/XTTS only if you have a GPU and want voice cloning.
+
+================================================================================
+4. CAPTIONING (Whisper transcription + word-level/karaoke burn-in)
+================================================================================
+ Name                        Stars   Last push         Fit
+ --------------------------------------------------------------------------
+ SYSTRAN/faster-whisper       26.5k  Nov 2026           EASY - importable
+                                                          library, word-level
+                                                          timestamps built in,
+                                                          CPU or GPU. Best
+                                                          transcription
+                                                          backbone.
+ m-bain/whisperX              25.1k  Oct 2026           MODERATE - Whisper +
+                                                          wav2vec2 forced
+                                                          alignment, most
+                                                          ACCURATE word timing
+                                                          + diarization; GPU
+                                                          strongly recommended.
+ jianfch/stable-ts            2.3k   May 2026           EASY - stabilizes
+                                                          Whisper word
+                                                          timestamps, can
+                                                          export ASS/SRT with
+                                                          word highlighting.
+ openai/whisper                112k  Aug 2026           EASY but slower than
+                                                          faster-whisper for
+                                                          same accuracy - use
+                                                          as fallback only.
+ m1guelpf/auto-subtitle        2.3k  Jul 2024 (STALE)    HARD to reuse
+                                                          directly (CLI-
+                                                          shaped, segment-
+                                                          level only, no
+                                                          karaoke highlight).
+                                                          Reference code only.
+ unconv/captacity              141   Jun 2024 (STALE)    MODERATE - closest
+                                                          architectural match
+                                                          to "karaoke captions
+                                                          for Shorts" (Whisper+
+                                                          ffmpeg+PIL) but
+                                                          unmaintained. Read as
+                                                          a blueprint, don't
+                                                          depend on it as-is.
+
+KEY FINDING: there is no actively-maintained, widely-adopted "karaoke
+caption burner" project. The ecosystem splits into (a) mature ASR/word-
+timing libraries (faster-whisper, whisperX, stable-ts - all cleanly
+importable) and (b) thin, stale hobby scripts that do the word-highlight
+burn-in (auto-subtitle, captacity).
+
+RECOMMENDATION: faster-whisper (or whisperX if diarization/tighter sync
+matters) for transcription + word timestamps, then write your OWN
+lightweight renderer via ffmpeg/libass (ASS subtitle format supports
+per-word karaoke \k tags natively) or Pillow-over-frames for the Reels/
+Shorts highlighted-word look. This is lighter and more controllable
+inside a FastAPI async worker than depending on any small burn-in repo.
+
+Run heavy models (Whisper/XTTS) in a background task/worker queue
+(Celery/RQ or a loaded-once singleton), not inside the request-response
+cycle - model load + GPU inference isn't naturally async-friendly.
+
+================================================================================
+5. VIDEO ASSEMBLY / RENDERING
+================================================================================
+ Name                        Stars   Last push         License     Fit
+ --------------------------------------------------------------------------
+ Zulko/moviepy                15.1k  2026-08-26         MIT         EASY - the
+                                                                      de facto
+                                                                      standard,
+                                                                      pure Python
+                                                                      API, wrap
+                                                                      render in
+                                                                      BackgroundTasks
+                                                                      /Celery.
+                                                                      NOTE: v1->v2
+                                                                      (2024) was a
+                                                                      breaking
+                                                                      rewrite -
+                                                                      pin to v2 API
+                                                                      (moviepy.editor
+                                                                      namespace
+                                                                      removed).
+ kkroening/ffmpeg-python       11k    2024-08-04 (STALE) Apache-2.0  EASY but
+                                                                      stale (524
+                                                                      open issues,
+                                                                      no push in
+                                                                      ~2yr).
+   -> prefer: jonghwanhyeon/python-ffmpeg (388*, pushed 2026-09-03,
+      MIT, sync+async API) as the actively-maintained alternative.
+ Breakthrough/PySceneDetect   5.4k   2026-11-02         BSD-3       EASY - scene-
+                                                                      cut detection
+                                                                      for auto-
+                                                                      cutting/beat-
+                                                                      matching stock
+                                                                      footage. Pre-
+                                                                      processing step,
+                                                                      not a renderer.
+ WyattBlue/auto-editor        5.8k   2026-11-05         Unlicense   MODERATE - core
+                                                                      rewritten in
+                                                                      Nim; use as a
+                                                                      CLI subprocess
+                                                                      (not a Python
+                                                                      import) to trim
+                                                                      silence/dead-air
+                                                                      from voiceover.
+ rezoo/movis                  487    2024-05-25 (STALE) MIT         MODERATE -
+                                                                      declarative
+                                                                      layer/timeline
+                                                                      compositing
+                                                                      (After-Effects-
+                                                                      style), smaller
+                                                                      community,
+                                                                      riskier for
+                                                                      production.
+ remotion-dev/remotion        70.8k  2026-11-04         Custom      HARD from
+   (NOT Python - TypeScript)                                        FastAPI -
+                                                                      React-based
+                                                                      templating,
+                                                                      true GPU-
+                                                                      accelerated
+                                                                      Chromium
+                                                                      rendering;
+                                                                      would need a
+                                                                      Node.js render
+                                                                      microservice
+                                                                      alongside
+                                                                      Python. Only
+                                                                      worth it for
+                                                                      polished
+                                                                      animated/
+                                                                      branded
+                                                                      templates
+                                                                      beyond ffmpeg
+                                                                      filters.
+
+RECOMMENDED STACK:
+ - Core assembly  : moviepy v2, called from a FastAPI BackgroundTasks or
+                     Celery worker (CPU-bound render -> always offload).
+ - Filter edge cases: jonghwanhyeon/python-ffmpeg or raw ffmpeg subprocess
+                     calls (not the stale ffmpeg-python).
+ - Pre-processing : PySceneDetect for footage segmentation; auto-editor
+                     (CLI subprocess) for trimming silence in voiceover.
+ - Captions       : generate .ass/.srt from Whisper word timestamps, burn
+                     via ffmpeg's subtitles=/ass= filter (or moviepy
+                     TextClip per word) - same approach MoneyPrinterTurbo
+                     uses.
+ - Docker         : all options need the system ffmpeg binary baked into
+                     the image (apt-get install ffmpeg) - none bundle it.
+ - Skip Remotion unless you specifically need templated/branded animated
+   graphics beyond what ffmpeg filters can do.
+
+================================================================================
+6. STOCK VISUAL & MUSIC ASSET SOURCING
+================================================================================
+ Name                     Stars  Last push    APIs wrapped            Fit
+ --------------------------------------------------------------------------
+ difyz9/stockmedia-sdk     0     2026-06-19   Pexels + Pixabay         Lightweight
+                                                                        requests-only,
+                                                                        retry logic;
+                                                                        near-zero
+                                                                        adoption -
+                                                                        audit before
+                                                                        trusting.
+ AtaCanYmc/stock-fetcher   0     2026-06-19   Pexels+Pixabay+          Widest
+                                               Unsplash+Flickr         provider
+                                               (keyless scraper)       coverage,
+                                                                        type-hinted;
+                                                                        Flickr client
+                                                                        is a fragile
+                                                                        scraper (no
+                                                                        official API).
+ MTG/freesound-python      159   2026-10-22   Freesound (music/SFX)   Official client
+                                                                        from Freesound's
+                                                                        own org - most
+                                                                        credible option
+                                                                        here. Full-
+                                                                        quality
+                                                                        downloads need
+                                                                        OAuth2.
+ joelio/stocky             28    2026-11-02   Pexels + Unsplash       Packaged as an
+                                               (as an MCP server)      MCP server, not
+                                                                        a direct import -
+                                                                        only useful if
+                                                                        you adopt MCP.
+ Lukas0025/python-pixabay  13    2023-02-06   Pixabay only            Stale (~45mo).
+ meetsohail/pexels-api-py  12    2022-02-07   Pexels only             Very stale
+                                                                        (~57mo);
+                                                                        reference for
+                                                                        request shape
+                                                                        only.
+
+KEY FINDING: no actively-maintained, widely-adopted, async-native Python
+SDK exists for Pexels/Pixabay/Freesound - every community wrapper is
+small/stale, because the underlying REST APIs are trivial enough that
+production projects (MoneyPrinterTurbo, purffle-shorts included) just
+hand-roll a thin httpx client against the official JSON APIs instead.
+
+RECOMMENDATION: write your own direct httpx.AsyncClient calls against the
+Pexels / Pixabay / Freesound REST APIs rather than taking a dependency on
+any of the wrappers above. Both Pexels (free key, 200 req/hr / 20k req/mo
+default, raisable with attribution) and Pixabay (free key, ~100 req/60s)
+have free tiers suitable for an automated pipeline; Freesound needs
+OAuth2 for full-quality downloads.
+
+================================================================================
+CROSS-CUTTING FLAGS / RISKS
+================================================================================
+ - purffle-shorts and MoneyPrinter (FujiwaraChoki) both bundle auto-
+   upload/scheduling to YouTube/TikTok/Instagram using unofficial/scraped
+   session cookies. This is OUT OF SCOPE for a generation-only pipeline
+   and carries platform ToS risk if kept - strip those modules if you
+   borrow code from either repo.
+ - Several previously "best in class" repos are stale/abandoned:
+   ShortGPT (~21mo), coqui-ai/TTS (org defunct, ~26mo), suno-ai/bark
+   (~27mo), kkroening/ffmpeg-python (~2yr), m1guelpf/auto-subtitle
+   (~28mo), unconv/captacity (~28mo). Treat these as design/prompt
+   references, not as production dependencies.
+ - Star count alone is a weak signal here: MoneyPrinterTurbo's 139k is
+   backed by 22k forks and active-today commits (genuinely strong), but
+   don't assume high stars = actively maintained elsewhere in this list -
+   check "last push" every time.
+ - License check: OHF-Voice/piper1-gpl is GPL-3.0 (copyleft) - verify
+   that's acceptable before depending on it in a closed-source backend;
+   everything else shortlisted above is MIT/BSD/Apache-2.0/MPL.
+
+================================================================================
+SUGGESTED STACK SUMMARY (Python + FastAPI, generation-only)
+================================================================================
+ Reference architecture : harry0703/MoneyPrinterTurbo (clone, read, adapt)
+ Script/idea generation : your own LLM client (OpenAI/Anthropic/Ollama),
+                           prompt design borrowed from MoneyPrinterTurbo /
+                           purffle-shorts
+ TTS                     : rhasspy/piper (default, local/CPU) or
+                           rany2/edge-tts (free cloud, accept ToS risk)
+ Captioning              : SYSTRAN/faster-whisper for transcription +
+                           word timestamps; hand-rolled ASS/libass or
+                           moviepy TextClip burn-in for karaoke style
+ Video assembly          : moviepy v2 + jonghwanhyeon/python-ffmpeg,
+                           run inside FastAPI BackgroundTasks/Celery
+ Pre-processing          : Breakthrough/PySceneDetect (scene cuts),
+                           WyattBlue/auto-editor (trim dead-air, CLI)
+ Stock assets            : hand-rolled httpx.AsyncClient against Pexels /
+                           Pixabay (visuals) and Freesound (music/SFX)
+                           official REST APIs - no third-party SDK needed
+ Infra notes             : bake ffmpeg into the Docker image; run all
+                           GPU/CPU-heavy steps (Whisper, XTTS, moviepy
+                           render) as background jobs, never in the
+                           request thread; load heavy models once at
+                           startup (singleton), not per-request
+
+================================================================================
+END OF REPORT
+================================================================================
