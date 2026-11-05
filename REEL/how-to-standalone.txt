@@ -1,0 +1,686 @@
+================================================================================
+HOW TO BUILD: STANDALONE (SINGLE-OPERATOR) REEL/SHORTS PIPELINE
+Python + FastAPI, NO queue broker, NO relational database
+================================================================================
+Status        : BUILD BLUEPRINT - Tier 1 (default build target)
+Companion docs: REEL/github-scan_reel-shorts-pipeline.txt  (the "WHAT
+                 to use" research - unchanged, still applies 100%)
+                 REEL/how-to.txt  (the "Tier 2" scale-up version: FastAPI
+                 + Celery/Redis + Postgres - keep it, don't delete it;
+                 see Section 20 for exactly when/how to move to it)
+
+WHY THIS FILE EXISTS
+--------------------------------------------------------------------------
+how-to.txt was designed for a multi-tenant service fielding concurrent
+requests from many callers. That's not this use case. The actual usage
+pattern is:
+
+    ONE CALL -> ONE OUTPUT. Call again later -> ONE NEW OUTPUT.
+    There is never more than one (or a small handful of) job(s) in
+    flight at a time, invoked by you, not by an open public API.
+
+For that pattern, a Celery/Redis job broker and a Postgres database are
+solving a concurrency problem that doesn't exist here. This document
+strips both out. IMPORTANT - this is a SLIMMING of infrastructure, not
+a slimming of engineering quality: every reliability property the
+Tier-2 doc had (non-blocking calls, resumable stages, retries, cost
+tracking, security posture, observability) is preserved below with a
+lighter-weight implementation. The only real trade-off is explicit and
+contained to Section 14 (crash recovery) - read that section before
+deciding this is "good enough."
+
+What does NOT change from the scan/how-to.txt research: the actual
+pipeline tool choices (TTS engine, captioning approach, assembly
+library, stock-asset APIs) and every security/licensing caveat in
+github-scan_reel-shorts-pipeline.txt. This document only replaces the
+ORCHESTRATION layer around that pipeline.
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+ 1. Design goals — slim infra, same quality bar
+ 2. High-level architecture (diagram)
+ 3. Pipeline stages & the JSON state machine
+ 4. API contract (FastAPI, unchanged from caller's point of view)
+ 5. State file schema (replaces the Postgres schema)
+ 6. Project folder structure
+ 7. In-process orchestration & concurrency control
+ 8. Storage strategy (unchanged from Tier 2)
+ 9. Containerization & deployment (one container, no compose stack)
+10. Configuration & secrets management
+11. Observability (logs + lightweight metrics)
+12. Security considerations (carried over, unchanged)
+13. Cost controls (JSON-based instead of DB-based)
+14. Crash recovery — the one real trade-off, and how it's covered
+15. Out-of-scope-for-now: posting/scheduling
+16. Testing strategy
+17. CI/CD pipeline
+18. Phased build roadmap / milestone checklist  <-- START HERE
+19. Appendix A: illustrative code skeletons
+20. Appendix B: when (and how) to graduate to the Tier-2 design
+
+================================================================================
+1. DESIGN GOALS — SLIM INFRA, SAME QUALITY BAR
+================================================================================
+Keep, unchanged from Tier 2:
+ - ASYNC-FEELING CALLS: the caller still gets an immediate job_id and
+   polls for status — achieved via FastAPI's own BackgroundTasks, not
+   a broker. No HTTP request sits open for the 1-5 minutes a render
+   takes.
+ - RESUMABLE STAGES: each stage still checks "is this already done?"
+   before redoing work. The check now reads a JSON file instead of a
+   DB row — same guarantee, lighter mechanism.
+ - COST-BOUNDED: still cap LLM/TTS/stock-API spend per job and per day
+   — tracked in a JSON log instead of a `api_usage` table.
+ - SECURE BY DEFAULT: identical posture to Tier 2 (Section 12) — none
+   of the security considerations were ever about the DB/queue choice.
+ - OBSERVABLE: still job_id-tagged structured logs; metrics become
+   optional/lighter (no Celery event stream to tap).
+
+Deliberately dropped (because nothing here needs them):
+ - A message broker (Redis/RabbitMQ) coordinating multiple worker
+   processes — there's only ever one process to coordinate.
+ - A relational database — job state for a handful of jobs at a time
+   doesn't need SQL querying; a JSON file per job is simpler to read,
+   debug, and back up (it's literally just a file you can `cat`).
+ - Horizontal worker scaling — out of scope by definition for a
+   single-operator tool. (Section 20 covers what to do if that stops
+   being true.)
+
+================================================================================
+2. HIGH-LEVEL ARCHITECTURE
+================================================================================
+
+                    +----------------------+
+                    |   You (CLI, curl,    |
+                    |   a tiny frontend,    |
+                    |   n8n, cron, etc.)    |
+                    +----------+-----------+
+                               | HTTP
+                               v
+                    +--------------------------+
+                    |      FastAPI app          |   <-- ONE process,
+                    |      (uvicorn, 1 worker    |       one deployable
+                    |       is enough)           |
+                    |  - POST /v1/generate       |
+                    |      -> BackgroundTasks    |
+                    |         .add_task(run_job) |
+                    |      -> returns job_id     |
+                    |         immediately        |
+                    |  - GET  /v1/jobs/{id}      |
+                    |      -> reads state.json   |
+                    |  - GET  /v1/jobs/{id}/     |
+                    |         download           |
+                    +------------+--------------+
+                                 |
+                                 v  (in-process async task,
+                                     capped by an asyncio.Semaphore
+                                     so you don't oversubscribe CPU
+                                     if 2 calls land close together)
+                    +--------------------------+
+                    |   pipeline/runner.py      |
+                    |   sequential orchestrator |
+                    |                           |
+                    |   script_gen()  (LLM)     |
+                    |        v                  |
+                    |   tts()         (Piper/   |
+                    |                  edge-tts)|
+                    |        v                  |
+                    |   asyncio.gather(          |
+                    |     captions(),  <- these  |
+                    |     assets()  )  run       |
+                    |                  concurrently,
+                    |                  no broker |
+                    |                  needed    |
+                    |        v                  |
+                    |   assembly()   (moviepy/   |
+                    |                  ffmpeg)   |
+                    +------------+--------------+
+                                 |
+                                 v
+                    +--------------------------+
+                    |   /data/jobs/{job_id}/     |
+                    |     state.json  <- THE     |
+                    |                    "DB"    |
+                    |     script.json            |
+                    |     audio.wav               |
+                    |     captions.ass            |
+                    |     assets/                 |
+                    |     output.mp4               |
+                    +--------------------------+
+
+Everything below the FastAPI box is ONE Python process. No Redis box,
+no Postgres box, no separate worker containers.
+
+================================================================================
+3. PIPELINE STAGES & THE JSON STATE MACHINE
+================================================================================
+Identical stage sequence to Tier 2 (Section 3 of how-to.txt) — this
+part of the design never depended on Celery/Postgres:
+
+  QUEUED -> SCRIPT_GENERATING -> SCRIPT_DONE -> AUDIO_SYNTHESIZING ->
+  AUDIO_DONE -> (TRANSCRIBING + SOURCING_ASSETS, concurrently) ->
+  CAPTIONS_DONE + ASSETS_DONE -> RENDERING -> RENDER_DONE -> COMPLETE
+
+  FAILED(stage, error) — reachable from any stage.
+
+The only change: this state machine is now encoded by writing a Python
+dict to `state.json` after every transition (atomically — write to a
+temp file, then os.replace() over the real path, so a crash mid-write
+never leaves a corrupt/partial state.json). There is no separate
+`job_stage_results` table — `state.json`'s `stages` dict IS that table,
+just scoped to one job per file instead of one row per job in a shared
+table.
+
+================================================================================
+4. API CONTRACT (unchanged from the caller's perspective)
+================================================================================
+Exactly the same surface as Tier 2 Section 4 — this is the point: a
+caller of this API cannot tell from the outside whether a Celery
+broker is behind it or a BackgroundTask is. That's good: it means you
+can upgrade later (Section 20) without breaking anyone who already
+integrated against this API.
+
+  POST /v1/jobs          -> 202 { job_id, status: "QUEUED" }
+  GET  /v1/jobs/{id}     -> 200 { job_id, status, stage_progress, error }
+  GET  /v1/jobs/{id}/download    -> video/mp4 (once COMPLETE)
+  GET  /v1/jobs/{id}/metadata    -> { title, description, hashtags, ... }
+  DELETE /v1/jobs/{id}   -> 204
+  GET  /v1/health        -> 200 { status: "ok" }
+
+Implementation difference only: POST /v1/jobs calls
+`background_tasks.add_task(run_job, job_id)` instead of
+`celery_task.delay(job_id)`. Everything else about the contract is
+identical.
+
+================================================================================
+5. STATE FILE SCHEMA (replaces the Postgres schema)
+================================================================================
+  /data/jobs/{job_id}/state.json
+  {
+    "job_id": "uuid",
+    "status": "RENDERING",
+    "topic": "3 surprising facts about octopuses",
+    "params": { ... the original POST body ... },
+    "created_at": "2026-11-05T10:00:00Z",
+    "updated_at": "2026-11-05T10:02:14Z",
+    "error": null,
+    "error_stage": null,
+    "retry_count": 0,
+    "stages": {
+      "script":   { "status": "done",   "output_path": "script.json",
+                    "started_at": "...", "finished_at": "...",
+                    "metadata": { "scene_count": 5 } },
+      "audio":    { "status": "done",   "output_path": "audio.wav",
+                    "metadata": { "duration_sec": 47.3 } },
+      "captions": { "status": "done",   "output_path": "captions.ass" },
+      "assets":   { "status": "done",   "output_path": "assets/" },
+      "render":   { "status": "in_progress" }
+    },
+    "asset_usage": [
+      { "provider": "pexels", "source_url": "...", "license_note": "...",
+        "downloaded_at": "..." }
+    ],
+    "cost_log": [
+      { "provider": "openai", "units": 850, "estimated_cost_usd": 0.0034,
+        "stage": "script", "at": "..." }
+    ]
+  }
+
+This single file replaces THREE Tier-2 tables (`jobs`,
+`job_stage_results`, `asset_usage`) for one job. There's no `api_usage`
+table either — see Section 13 for how cost tracking works without it.
+
+READ/WRITE RULE: always read-modify-write the whole file, and always
+write via temp-file + `os.replace()` (atomic on POSIX and Windows).
+Never open the file in append mode for partial edits — that's how you
+corrupt JSON under a crash mid-write.
+
+LISTING JOBS: since there's no DB to `SELECT * FROM jobs`, "list all
+jobs" is just "list the subdirectories of /data/jobs/ and read each
+state.json" — genuinely fine at the volume this is built for (tens to
+low thousands of job directories, not millions).
+
+================================================================================
+6. PROJECT FOLDER STRUCTURE
+================================================================================
+  reel-pipeline/
+    app/
+      main.py                 # FastAPI app factory
+      api/
+        routes/jobs.py         # same endpoints as Tier 2, calls
+                                # BackgroundTasks instead of Celery
+        deps.py                 # API-key auth, unchanged
+      core/
+        config.py               # pydantic Settings (Section 10)
+        logging.py
+      pipeline/
+        script_gen.py           # UNCHANGED from Tier 2
+        tts.py                   # UNCHANGED from Tier 2
+        captions.py              # UNCHANGED from Tier 2
+        assets.py                # UNCHANGED from Tier 2
+        assembly.py              # UNCHANGED from Tier 2
+        runner.py                # NEW — replaces workers/tasks.py +
+                                  # celery_app.py. Plain async function
+                                  # that calls the stages in order,
+                                  # gathers captions+assets concurrently,
+                                  # updates state.json after each stage.
+        retry.py                 # NEW — small retry-with-backoff
+                                  # decorator for network-bound stage
+                                  # calls (replaces Celery's autoretry_for)
+      state/
+        store.py                 # NEW — replaces models/db.py. Atomic
+                                  # JSON read/write helpers:
+                                  # load_state(job_id), save_state(job_id,
+                                  # dict), update_stage(job_id, stage,
+                                  # status, **fields)
+      storage/
+        paths.py                 # UNCHANGED from Tier 2
+        backend.py                # UNCHANGED from Tier 2 (local disk;
+                                  # same interface if you ever add S3)
+    tests/
+      unit/
+      integration/
+    docker/
+      Dockerfile                 # ONE image (no Dockerfile.worker split
+                                  # needed — same process does everything)
+      docker-compose.yml          # OPTIONAL — really just `docker run`
+                                  # with a volume mount; compose only
+                                  # helps if you also want a reverse
+                                  # proxy in front
+    .env.example
+    pyproject.toml / requirements.txt
+    README.md
+
+Gone entirely vs. Tier 2: `migrations/` (Alembic — no schema to
+migrate), `workers/celery_app.py`, `models/db.py`.
+
+================================================================================
+7. IN-PROCESS ORCHESTRATION & CONCURRENCY CONTROL
+================================================================================
+This section is what actually replaces "Celery/worker pools."
+
+ - ORCHESTRATION: `pipeline/runner.py` has one function,
+   `async def run_job(job_id: str)`, that calls each stage in order,
+   `await`-ing network/CPU-bound work via `asyncio.to_thread()` for
+   anything synchronous/blocking (moviepy render, a sync TTS call),
+   and uses `await asyncio.gather(captions_stage(...), assets_stage(...))`
+   for the two stages that don't depend on each other.
+
+ - CONCURRENCY ACROSS JOBS: cap how many `run_job` calls execute at
+   once with a module-level `asyncio.Semaphore(MAX_CONCURRENT_JOBS)`
+   (config value, default 1 or 2) acquired at the top of `run_job`.
+   This is the ENTIRE replacement for "worker pool sizing" — one line,
+   no infra. If `MAX_CONCURRENT_JOBS=1`, a second `POST /v1/jobs` call
+   just queues behind the semaphore and starts the moment the first
+   finishes — which matches "one call, one output, then the next"
+   exactly as you described it.
+
+ - RETRIES: `pipeline/retry.py` — a small decorator (or just use the
+   `tenacity` package) wrapping each network-bound stage call (LLM,
+   stock-asset HTTP calls) with exponential backoff + jitter, capped
+   retries (e.g. 3), same policy Tier 2 had via Celery's
+   `autoretry_for` — just a plain Python decorator instead of a
+   framework feature.
+
+ - TIMEOUTS: wrap each stage call in `asyncio.wait_for(..., timeout=N)`
+   — same effect as Celery's per-task `time_limit`, no framework needed.
+
+ - IDEMPOTENCY: before running a stage, `runner.py` checks
+   `state["stages"][stage]["status"] == "done"` AND the recorded
+   output file still exists on disk — skip if both true. Identical
+   guarantee to Tier 2's DB-backed check, just reading JSON instead of
+   a row.
+
+ - WHAT YOU GENUINELY GIVE UP: true OS-level process isolation between
+   jobs (a hard crash of the FastAPI process kills every in-flight job,
+   where Celery workers could crash independently of the API). At
+   `MAX_CONCURRENT_JOBS=1-2` for a single-operator tool, this is a
+   minor, recoverable trade-off — see Section 14 for exactly how
+   recovery works.
+
+================================================================================
+8. STORAGE STRATEGY
+================================================================================
+Unchanged from Tier 2 (how-to.txt Section 8) — the on-disk job layout
+(`/data/jobs/{job_id}/{script.json, audio.wav, captions.ass, assets/,
+output.mp4}`) was never dependent on Celery or Postgres. Local disk
+volume is even MORE sufficient here than in Tier 2, since you're not
+trying to share storage across multiple worker machines — one process,
+one disk. Object storage (S3/GCS) only becomes relevant if you deploy
+this somewhere with ephemeral/non-persistent local disk (e.g. certain
+serverless platforms) — most single-operator deployments (a VPS, a
+home server, a single container with a mounted volume) don't need it.
+
+Retention policy: same idea as Tier 2 — set an `expires_at` field
+inside `state.json`, and a simple scheduled job (a cron entry, or
+`asyncio` periodic task inside the same FastAPI process using
+`apscheduler` or even just checking on each request) sweeps and
+deletes expired job directories. No Celery Beat needed for this either.
+
+================================================================================
+9. CONTAINERIZATION & DEPLOYMENT
+================================================================================
+ - ONE Dockerfile: Python base image + `apt-get install -y ffmpeg` +
+   your pip deps + `uvicorn app.main:app`. That's the whole deployment
+   unit.
+ - NO docker-compose stack of api+worker+redis+postgres. If you want
+   a reverse proxy (TLS termination) in front, that's the only other
+   container you'd add — still a 2-container compose file at most,
+   versus Tier 2's 4-6.
+ - Deploy anywhere that can run one container with a persistent
+   volume mount for `/data`: a single VPS, a home server, a basic
+   managed-container service (Cloud Run with a mounted disk / a
+   Fargate task with EFS, etc.) — pick whichever is least operational
+   overhead for you; this design doesn't require anything fancier.
+ - Scaling note: if you ever run more than one instance of this
+   container for redundancy, you MUST point `/data` at shared storage
+   (not two separate local disks) or job state silently diverges per
+   instance. If you find yourself wanting that, you've actually hit
+   the point where Section 20's upgrade applies — don't try to
+   multi-instance the JSON-file design, graduate instead.
+
+================================================================================
+10. CONFIGURATION & SECRETS MANAGEMENT
+================================================================================
+Same approach as Tier 2 (pydantic `Settings`, `.env` for local dev,
+a real secrets manager for anything deployed) minus `DATABASE_URL` and
+`REDIS_URL`, plus:
+  MAX_CONCURRENT_JOBS      (default 1 or 2 — see Section 7)
+  JOB_RETENTION_DAYS
+  DATA_DIR                  (where /data/jobs lives)
+All provider API keys (LLM, Pexels/Pixabay/Freesound, TTS if a paid
+provider) are identical to Tier 2 — the provider abstraction pattern
+(swap via config, Section 10 of how-to.txt) still fully applies and
+is unaffected by the orchestration-layer change.
+
+================================================================================
+11. OBSERVABILITY
+================================================================================
+ - Structured JSON logs with `job_id` on every line — unchanged.
+ - No Celery event stream to tap for metrics. Options, lightest first:
+     (a) Nothing extra — `tail`/`grep` the structured logs; genuinely
+         sufficient for single-operator volume.
+     (b) `prometheus-fastapi-instrumentator` for basic request metrics
+         if you want a dashboard anyway — a few lines, no new service
+         besides a Prometheus scrape target.
+     (c) A tiny `GET /v1/jobs` (list) endpoint that reads all
+         `state.json` files and summarizes status counts — your
+         "queue depth" equivalent, computed on demand instead of
+         scraped from a broker.
+ - Error tracking (Sentry) still wires in exactly the same way —
+   unaffected by this change.
+
+================================================================================
+12. SECURITY CONSIDERATIONS
+================================================================================
+CARRIED OVER UNCHANGED from how-to.txt Section 12 — every point there
+(API-key auth, rate limiting, prompt-injection handling, the ffmpeg
+argument-list rule, content moderation, third-party asset licensing,
+the GPL/non-commercial license flags from the scan doc, secrets
+redaction in logs, SSRF caution on user-supplied URLs) applies exactly
+as written. None of it was ever about the queue/DB choice — don't
+skip re-reading it just because this is the "slim" doc.
+
+One ADDITION specific to this design: since job state now lives in
+plain JSON files on disk rather than behind a DB access layer, make
+sure `/data/jobs/` is NOT inside any directory served as static files
+by FastAPI (no accidental `StaticFiles` mount over it) — a state.json
+or a script.json could leak the original prompt/topic and any
+embedded API response text if exposed directly.
+
+================================================================================
+13. COST CONTROLS
+================================================================================
+Same philosophy as Tier 2 (Section 13 of how-to.txt), DB-free
+mechanics:
+ - Per-job caps (max script tokens, max asset queries per scene) —
+   enforced in code, unaffected by storage choice.
+ - Per-day quota: maintain `/data/usage/{YYYY-MM-DD}.json` with a
+   running count/cost total, incremented after each provider call;
+   check it before starting a new job and reject with 429 if the cap
+   is hit. This is the JSON equivalent of the Tier-2 `api_usage` table
+   query — same guarantee, no SQL needed because the aggregation is
+   trivial at this volume.
+ - Caching: identical recommendation — cache TTS audio by
+   hash(text, voice) and stock-asset query results by keyword, as
+   files under `/data/cache/` (a plain content-addressed directory is
+   enough; no Redis cache needed).
+ - Cost-per-job visibility: each `state.json`'s `cost_log` already has
+   this (Section 5) — "what did job X cost" is `cat state.json`; "what
+   did this week cost" is a five-line script that sums `cost_log`
+   across every job directory. No dashboard required unless you want
+   one.
+ - Provider defaults: unchanged — free/local-first (Piper, faster-
+   whisper on CPU, Pexels/Pixabay free tier) as default, paid
+   providers opt-in per request.
+
+================================================================================
+14. CRASH RECOVERY — THE ONE REAL TRADE-OFF
+================================================================================
+This is the part Tier 2 handled "for free" via Celery's durable broker
+(a task survives the worker process dying — it's redelivered). A
+single in-process `BackgroundTasks` call does NOT survive the FastAPI
+process dying mid-job. Handle it explicitly, not by ignoring it:
+
+ - ON EVERY FASTAPI STARTUP, run a reconcile sweep:
+     1. List every `/data/jobs/*/state.json`.
+     2. For any job whose `status` is a non-terminal value (not
+        COMPLETE/FAILED) and whose `updated_at` is older than a
+        config threshold (e.g. 2x your longest expected render time),
+        assume the process died mid-job.
+     3. Re-invoke `run_job(job_id)` for it. Because every stage check
+        is idempotent (Section 7), this resumes from the first
+        not-yet-done stage — it does NOT restart from scratch.
+     4. If a job has already been auto-resumed N times (track a
+        `resume_count` in state.json) without completing, mark it
+        FAILED with `error = "exceeded auto-resume limit"` instead of
+        looping forever on a poison job.
+ - This sweep is maybe 20 lines of code and runs once at startup
+   (FastAPI `lifespan` event) — it is the entire crash-recovery story,
+   and it gives you the same practical guarantee Celery's broker gave
+   you (no job silently vanishes on a crash/restart), just checked at
+   process-start instead of continuously by a broker.
+ - Residual gap vs. Tier 2: a job that's mid-render WHILE the process
+   crashes loses that one render attempt's progress (ffmpeg doesn't
+   checkpoint mid-encode) and the reconcile sweep re-runs that stage
+   from its beginning — which is fine (render is usually the fastest
+   stage to redo relative to script/TTS/caption work that's already
+   cached in state) but is not "resume at the exact frame" durability.
+   Accept this explicitly; it's not worth Celery's operational cost to
+   close for a single-operator tool.
+
+================================================================================
+15. OUT OF SCOPE FOR NOW: POSTING/SCHEDULING
+================================================================================
+Same note as Tier 2 (how-to.txt Section 14) — unaffected by this
+change. When you build it, it's a `publish` stage with its own
+explicit confirmation gate, using each platform's official API. Don't
+auto-publish on render success.
+
+================================================================================
+16. TESTING STRATEGY
+================================================================================
+Same unit/integration split as Tier 2, with one adjustment:
+ - The "worker failure injection" test (how-to.txt Section 15) becomes
+   a "process restart" test here: start `run_job`, kill it partway
+   through (e.g. monkeypatch one stage to raise after partially
+   writing state, or literally run it in a subprocess and SIGKILL it),
+   then call the Section 14 reconcile sweep and assert the job
+   completes on resume, having skipped the already-done stages (assert
+   via a call counter/mock that the skipped stages' real implementation
+   was NOT invoked again). This is what proves the idempotency +
+   crash-recovery design actually holds — don't skip writing it.
+ - Everything else (mocked unit tests per pipeline module, a mocked
+   end-to-end integration test) is identical to Tier 2.
+
+================================================================================
+17. CI/CD PIPELINE
+================================================================================
+Simpler than Tier 2: lint + unit + integration tests on every push;
+build the single Docker image; no Alembic migration step (nothing to
+migrate). Deploy is "stop the old container, start the new one with
+the same `/data` volume mounted" — confirm the Section 14 reconcile
+sweep runs on the new container's startup so any job that was in
+flight during the deploy gets picked back up.
+
+================================================================================
+18. PHASED BUILD ROADMAP / MILESTONE CHECKLIST  <-- START HERE
+================================================================================
+ PHASE 0 — Skeleton
+   [ ] FastAPI "hello world" + /v1/health.
+   [ ] Dockerfile builds and runs with ffmpeg installed.
+
+ PHASE 1 — Synchronous proof-of-pipeline
+   [ ] One LLM provider, Piper TTS, one stock-footage call, moviepy
+       assembly, all called synchronously in a single script to
+       de-risk the hardest integration first — identical to Tier 2's
+       Phase 1, this part doesn't change.
+
+ PHASE 2 — Async-feeling API, JSON state (replaces Tier 2's "add
+            Postgres+Celery" phase)
+   [ ] `state/store.py` atomic JSON read/write helpers + unit tests
+       for the atomic-write-under-crash behavior specifically.
+   [ ] `pipeline/runner.py` sequential orchestrator calling the real
+       stage functions, updating state.json after each one.
+   [ ] POST /v1/jobs using BackgroundTasks; GET /v1/jobs/{id} reading
+       state.json. Manually verify: call it twice in a row, confirm
+       each call produces its own job_id/output independently.
+   [ ] Idempotency check implemented; prove it with the resumability
+       unit test (Section 16).
+
+ PHASE 3 — Full pipeline quality (identical goals to Tier 2 Phase 3)
+   [ ] faster-whisper captions stage; multi-scene asset sourcing;
+       metadata generation; provider abstraction proven by swapping
+       TTS/LLM provider via config with no code change.
+
+ PHASE 4 — Hardening
+   [ ] API key auth + basic rate limiting.
+   [ ] Retention sweep (Section 8) + daily cost cap (Section 13).
+   [ ] Structured logging with job_id everywhere.
+   [ ] Section 14's reconcile-on-startup sweep implemented AND tested
+       (the process-restart test from Section 16) — do not skip this
+       one just because it's "only" a single-operator tool; it's the
+       cheapest insurance in this whole document.
+
+ PHASE 5 — Deploy
+   [ ] One container, one persistent volume, deployed wherever is
+       least operational overhead for you.
+   [ ] Confirm the reconcile sweep actually fires on a real restart
+       (kill -9 the container mid-job on purpose once, watch it
+       recover) before calling this "production."
+
+ PHASE 6 — (Only if needed later) Evaluate Section 20's upgrade path.
+
+================================================================================
+19. APPENDIX A: ILLUSTRATIVE CODE SKELETONS
+================================================================================
+(Illustrative only.)
+
+--- app/state/store.py ------------------------------------------------------
+  import json, os, tempfile
+  from pathlib import Path
+
+  def _path(job_id: str) -> Path:
+      return Path(DATA_DIR) / "jobs" / job_id / "state.json"
+
+  def load_state(job_id: str) -> dict:
+      with open(_path(job_id), "r") as f:
+          return json.load(f)
+
+  def save_state(job_id: str, state: dict) -> None:
+      p = _path(job_id)
+      p.parent.mkdir(parents=True, exist_ok=True)
+      fd, tmp_path = tempfile.mkstemp(dir=p.parent)
+      with os.fdopen(fd, "w") as f:
+          json.dump(state, f, indent=2)
+      os.replace(tmp_path, p)          # atomic on POSIX and Windows
+
+  def update_stage(job_id: str, stage: str, status: str, **fields) -> dict:
+      state = load_state(job_id)
+      state["stages"][stage] = {"status": status, **fields}
+      state["updated_at"] = now_iso()
+      save_state(job_id, state)
+      return state
+
+--- app/pipeline/runner.py (orchestration + concurrency cap) ----------------
+  import asyncio
+  _semaphore = asyncio.Semaphore(settings.MAX_CONCURRENT_JOBS)
+
+  async def run_job(job_id: str) -> None:
+      async with _semaphore:
+          state = load_state(job_id)
+          try:
+              if not stage_done(state, "script"):
+                  await run_stage(job_id, "script", script_gen.generate)
+              if not stage_done(state, "audio"):
+                  await run_stage(job_id, "audio", tts.synthesize)
+
+              # captions + assets don't depend on each other
+              await asyncio.gather(
+                  run_stage_if_needed(job_id, "captions", captions.transcribe),
+                  run_stage_if_needed(job_id, "assets", assets.source),
+              )
+
+              if not stage_done(state, "render"):
+                  await run_stage(job_id, "render", assembly.render)
+
+              mark_complete(job_id)
+          except Exception as e:
+              mark_failed(job_id, stage=current_stage, error=str(e))
+
+--- app/main.py (reconcile-on-startup, Section 14) ---------------------------
+  from fastapi import FastAPI
+  from contextlib import asynccontextmanager
+
+  @asynccontextmanager
+  async def lifespan(app: FastAPI):
+      for job_id in list_stale_nonterminal_jobs():     # Section 14 rule
+          asyncio.create_task(run_job(job_id))           # resumes, not restarts
+      yield
+
+  app = FastAPI(lifespan=lifespan)
+
+  @app.post("/v1/jobs", status_code=202)
+  async def create_job(req: JobCreateRequest, background_tasks: BackgroundTasks):
+      job_id = create_job_state(req)        # writes initial state.json
+      background_tasks.add_task(run_job, job_id)
+      return {"job_id": job_id, "status": "QUEUED"}
+
+================================================================================
+20. APPENDIX B: WHEN (AND HOW) TO GRADUATE TO THE TIER-2 DESIGN
+================================================================================
+Move to how-to.txt's Celery/Redis/Postgres design when ANY of these
+becomes true — not before, since each is solving a problem this
+document's design genuinely doesn't have yet:
+
+ - You need more than ~2-3 jobs genuinely running at once (not queued
+   behind the semaphore — actually concurrently rendering), because a
+   single process's CPU can't keep up.
+ - You need the pipeline reachable by MULTIPLE independent callers
+   (not just you) with fairness/quota guarantees between them.
+ - You need true process-level fault isolation (one job's crash must
+   never affect another in-flight job) rather than this design's
+   "whole process restarts, reconcile sweep resumes everything."
+ - You need to run worker capacity on different machines/hardware
+   (e.g. GPU workers separate from the API server) rather than
+   everything in one container.
+
+HOW TO MIGRATE WHEN THAT DAY COMES: the good news is `pipeline/
+script_gen.py`, `tts.py`, `captions.py`, `assets.py`, `assembly.py` do
+NOT change at all — they're plain functions regardless of what calls
+them. The migration is: (1) stand up Redis + Postgres, (2) rewrite
+`state/store.py`'s functions to read/write Postgres rows instead of
+JSON files behind the exact same function signatures
+(`load_state`/`save_state`/`update_stage`), (3) replace
+`pipeline/runner.py`'s direct calls with Celery task dispatch
+(`chain()`/`group()` as in how-to.txt Section 7), (4) delete the
+Section 14 reconcile sweep (Celery's broker now does that job). None
+of this is a rewrite of the actual video-generation logic — it's a
+swap of the orchestration shell around it, which is exactly why it was
+worth keeping the API contract (Section 4) identical between both
+documents from day one.
+
+================================================================================
+END OF DOCUMENT
+================================================================================
