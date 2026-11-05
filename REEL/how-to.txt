@@ -548,11 +548,15 @@ the architecture doesn't box it out later:
    action behind an explicit y/n confirmation; the same pattern is
    worth reusing here (require an explicit "publish" call on a
    COMPLETE job, never auto-publish on render success).
- - When you do build it: do NOT follow the pattern flagged in the
-   scan report where tools auto-upload via scraped/unofficial session
-   cookies (purffle-shorts, FujiwaraChoki/MoneyPrinter both do this).
-   Use each platform's official API with your own registered app
-   credentials and documented ToS-compliant upload flow.
+ - When you do build it: do NOT follow the pattern confirmed in the
+   scan report where FujiwaraChoki/MoneyPrinter auto-uploads to TikTok
+   via a scraped/unofficial browser session cookie. (purffle-shorts
+   was re-checked during review and uses official YouTube/Instagram
+   APIs plus a third-party publishing service for TikTok, not scraped
+   cookies - still worth stripping as out-of-scope, but not the same
+   risk class.) Use each platform's official API with your own
+   registered app credentials and a documented ToS-compliant upload
+   flow.
 
 ================================================================================
 15. TESTING STRATEGY
@@ -733,9 +737,21 @@ the architecture doesn't box it out later:
 ================================================================================
  - Piper's actively-maintained fork is GPL-3.0 — decide now whether
    that's acceptable for this project's distribution model, or budget
-   time to swap to edge-tts (unofficial API risk) / a GPU-based
-   Coqui-fork voice instead. Don't discover this license question
-   after the pipeline is built around Piper.
+   time to swap to edge-tts (unofficial API risk) instead. Don't
+   discover this license question after the pipeline is built around
+   Piper.
+ - [ADDED on review, 2026-11-05] A GPU-based Coqui-fork/XTTS voice is
+   NOT a clean fallback for the Piper GPL question above — it trades
+   one license problem for a worse one. Coqui Inc. shut down in early
+   2024; the TTS *code* is MPL-2.0 (permissive, fine), but the XTTS-v2
+   *model weights* themselves ship under a NON-COMMERCIAL license, and
+   since Coqui Inc. no longer exists there is no longer anywhere to
+   buy a commercial license for them. If this pipeline is for any
+   commercial/monetized use, XTTS-v2 is likely off the table entirely,
+   not just a "needs a GPU" tradeoff as the scan's TTS table implies —
+   verify current XTTS-v2 license terms directly before depending on
+   it, and treat edge-tts or a non-XTTS Coqui-community voice model as
+   the real alternative to the Piper GPL question.
  - No actively-maintained "karaoke caption burn-in" library exists
    (confirmed in the scan) — budget real engineering time for the
    `pipeline/captions.py` ASS-generation-from-word-timestamps code;

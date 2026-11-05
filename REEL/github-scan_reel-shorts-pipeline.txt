@@ -135,12 +135,15 @@ shape, not a library to import.
 ================================================================================
  Name                    Stars        Last push        License    Fit
  --------------------------------------------------------------------------
- rhasspy/piper            11.3k       Aug 2025 (stale)  MIT        EASY -
+ rhasspy/piper            11.3k       Aug 2025 (ARCHIVED -  MIT      EASY -
    + active fork           6.2k       Nov 2026 (active) GPL-3.0*   pip install
    OHF-Voice/piper1-gpl                                            piper-tts,
                                                                      CPU-only,
                                                                      sub-second,
                                                                      no network.
+   [VERIFIED via GitHub API 2026-11-05: rhasspy/piper is formally ARCHIVED
+   (read-only, no new commits/issues/PRs accepted) - not merely stale.
+   Use OHF-Voice/piper1-gpl, not the upstream repo, for anything new.]
    *check GPL-3.0 copyleft acceptability for your backend if using the fork.
 
  rany2/edge-tts            12.5k      Oct 2026          Unofficial EASY - native
@@ -153,13 +156,21 @@ shape, not a library to import.
                                                                      no SLA, could
                                                                      break/throttle.
 
- coqui-ai/TTS              46.2k      Aug 2024 (stale,  MPL-2.0    MODERATE -
+ coqui-ai/TTS              46.2k      Aug 2024 (stale,  MPL-2.0*   MODERATE -
                                         org defunct;                XTTS-v2 voice
                                         community forks                cloning,
                                         keep it alive)               wants a GPU,
                                                                      load model
                                                                      once at
                                                                      startup.
+   *[CORRECTED on review, 2026-11-05: MPL-2.0 covers the TTS CODE only.
+   The XTTS-v2 MODEL WEIGHTS - the actual voice-cloning model this row
+   recommends - ship under a separate NON-COMMERCIAL license. Coqui
+   Inc. shut down in Jan 2024 and no longer sells commercial licenses
+   for it. Do NOT treat this row as GPU-cost-tradeoff-only; verify
+   current XTTS-v2 license terms before using it in anything
+   commercial/monetized - it may not be legally usable at all for that
+   case, independent of the permissive code license.]
 
  k2-fsa/sherpa-onnx        15.7k      Nov 2026          Apache-2.0 MODERATE -
                                                                      offline ASR+
@@ -197,11 +208,16 @@ acceptable; Coqui/XTTS only if you have a GPU and want voice cloning.
                                                           ACCURATE word timing
                                                           + diarization; GPU
                                                           strongly recommended.
- jianfch/stable-ts            2.3k   May 2026           EASY - stabilizes
+ jianfch/stable-ts            2.3k   May 2026 (ARCHIVED)  EASY - stabilizes
                                                           Whisper word
                                                           timestamps, can
                                                           export ASS/SRT with
                                                           word highlighting.
+                                                          [VERIFIED 2026-11-05:
+                                                          formally archived -
+                                                          read-only, no fixes
+                                                          coming. Usable as-is,
+                                                          but a frozen dependency.]
  openai/whisper                112k  Aug 2026           EASY but slower than
                                                           faster-whisper for
                                                           same accuracy - use
@@ -333,7 +349,7 @@ RECOMMENDED STACK:
 ================================================================================
  Name                     Stars  Last push    APIs wrapped            Fit
  --------------------------------------------------------------------------
- difyz9/stockmedia-sdk     0     2026-06-19   Pexels + Pixabay         Lightweight
+ difyz9/stockmedia_sdk     0     2026-06-01   Pexels + Pixabay         Lightweight
                                                                         requests-only,
                                                                         retry logic;
                                                                         near-zero
@@ -385,22 +401,60 @@ OAuth2 for full-quality downloads.
 CROSS-CUTTING FLAGS / RISKS
 ================================================================================
  - purffle-shorts and MoneyPrinter (FujiwaraChoki) both bundle auto-
-   upload/scheduling to YouTube/TikTok/Instagram using unofficial/scraped
-   session cookies. This is OUT OF SCOPE for a generation-only pipeline
-   and carries platform ToS risk if kept - strip those modules if you
-   borrow code from either repo.
+   upload/scheduling to YouTube/TikTok/Instagram - OUT OF SCOPE for a
+   generation-only pipeline; strip those modules if you borrow code
+   from either repo. [CORRECTED after re-reading both READMEs on
+   2026-11-05 - the original phrasing of this flag overstated purffle-
+   shorts's risk by lumping it with MoneyPrinter's mechanism. The two
+   are NOT the same risk level:
+     - FujiwaraChoki/MoneyPrinter: CONFIRMED - its own README instructs
+       users to copy their TikTok browser session cookie (`sessionid`)
+       for upload. This is unofficial/reverse-engineered and carries
+       real ToS risk.
+     - purffle-shorts: publishes via YouTube/Instagram's own official
+       APIs and a third-party multi-platform publishing service
+       ("Upload-Post") for TikTok - not confirmed to scrape session
+       cookies itself. Still out-of-scope to strip (you don't want
+       posting in a generation-only pipeline), but don't carry over
+       the "scraped cookie" characterization to this repo specifically.]
  - Several previously "best in class" repos are stale/abandoned:
    ShortGPT (~21mo), coqui-ai/TTS (org defunct, ~26mo), suno-ai/bark
    (~27mo), kkroening/ffmpeg-python (~2yr), m1guelpf/auto-subtitle
    (~28mo), unconv/captacity (~28mo). Treat these as design/prompt
    references, not as production dependencies.
+ - [ADDED on review, 2026-11-05] TWO repos in this report are not just
+   stale but formally ARCHIVED (GitHub read-only state - confirmed via
+   API, no new issues/PRs/commits possible, not merely "no recent
+   activity"): rhasspy/piper (upstream TTS - use OHF-Voice/piper1-gpl
+   fork instead, per Section 3) and jianfch/stable-ts (captioning -
+   per Section 4, usable as a frozen dependency but expect no fixes).
  - Star count alone is a weak signal here: MoneyPrinterTurbo's 139k is
    backed by 22k forks and active-today commits (genuinely strong), but
    don't assume high stars = actively maintained elsewhere in this list -
    check "last push" every time.
- - License check: OHF-Voice/piper1-gpl is GPL-3.0 (copyleft) - verify
-   that's acceptable before depending on it in a closed-source backend;
-   everything else shortlisted above is MIT/BSD/Apache-2.0/MPL.
+ - License check, corrected/expanded on review (2026-11-05, verified
+   live via GitHub API against every repo in this report):
+     - OHF-Voice/piper1-gpl: GPL-3.0 (copyleft) - verify acceptable
+       before depending on it in a closed-source backend.
+     - coqui-ai/TTS: code is MPL-2.0, but the XTTS-v2 MODEL WEIGHTS it
+       would actually be used for are separately non-commercial-
+       licensed - see Section 3's corrected entry. Do not rely on the
+       code's MPL-2.0 license as covering the model.
+     - WyattBlue/auto-editor: Unlicense (public-domain-equivalent) -
+       fine to use, just note it's not MIT/Apache if your compliance
+       process checks for SPDX license families.
+     - rany2/edge-tts and remotion-dev/remotion: GitHub reports NO
+       recognized SPDX license (NOASSERTION) for both - edge-tts is
+       already flagged elsewhere as an unofficial/reverse-engineered
+       API; Remotion ships a custom license in-repo (read it directly,
+       don't assume MIT-equivalent terms).
+     - difyz9/stockmedia_sdk and meetsohail/pexels-api-py: NO LICENSE
+       FILE in the repo at all - that means default copyright applies
+       (no permission granted), not "unlicensed = free to use." Do not
+       depend on either without contacting the author or finding an
+       explicit license grant.
+     - Everything else shortlisted above (MIT/BSD/Apache-2.0) is
+       confirmed clean via live API check.
 
 ================================================================================
 SUGGESTED STACK SUMMARY (Python + FastAPI, generation-only)
