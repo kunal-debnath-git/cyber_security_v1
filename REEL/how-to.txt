@@ -46,6 +46,11 @@ TABLE OF CONTENTS
 17. Phased build roadmap / milestone checklist  <-- START HERE WHEN BUILDING
 18. Appendix A: illustrative code skeletons
 19. Appendix B: open decisions / risks to revisit
+20. Appendix C: CONTENT-QUALITY SPEC — what each stage must actually
+    produce (hook/flow/sound/visuals) — mirrored from
+    how-to-standalone.txt Section 21 on 2026-11-05; applies here
+    unchanged since it governs pipeline/*.py, not the orchestration
+    layer this doc adds on top
 
 ================================================================================
 1. DESIGN GOALS — WHAT "PRODUCTION-READY" MEANS HERE
@@ -282,6 +287,12 @@ Use Alembic (SQLAlchemy migrations) from the very first schema —
 retrofitting migrations onto a schema-less "just CREATE TABLE in a
 script" setup is painful later.
 
+NOTE [added 2026-11-05]: `job_stage_results.output_path` for the
+"script" stage points at content that must hold the structured
+hook/setup/payload_beats/rehook_cues/payoff/loop_line/cta fields
+defined in Section 20 (Appendix C) — not a flat script string. The
+assembly and captions stages depend on that structure existing.
+
 ================================================================================
 6. PROJECT FOLDER STRUCTURE
 ================================================================================
@@ -295,11 +306,24 @@ script" setup is painful later.
         config.py              # pydantic Settings (env-driven, Sec. 10)
         logging.py              # structured logging setup
       pipeline/
-        script_gen.py           # LLM call -> script/title/hashtags
-        tts.py                   # Piper/edge-tts wrapper, provider-agnostic
-        captions.py              # faster-whisper -> word timestamps -> .ass
-        assets.py                # Pexels/Pixabay/Freesound httpx clients
-        assembly.py              # moviepy/ffmpeg render
+        script_gen.py           # LLM call -> script/title/hashtags.
+                                  # Output schema per Section 20
+                                  # (structured beats, not flat text).
+        tts.py                   # Piper/edge-tts wrapper, provider-agnostic.
+                                  # Section 20 adds required LUFS
+                                  # loudness normalization post-step.
+        captions.py              # faster-whisper -> word timestamps -> .ass.
+                                  # Section 20 adds a second, visually
+                                  # distinct hook/CTA text overlay layer
+                                  # plus safe-zone placement rules.
+        assets.py                # Pexels/Pixabay/Freesound httpx clients.
+                                  # Section 20 adds per-beat (not
+                                  # per-video) relevance querying.
+        assembly.py              # moviepy/ffmpeg render. Section 20 adds
+                                  # audio ducking, SFX accents, cut-
+                                  # cadence, color-normalization, and
+                                  # loop-point requirements — most of
+                                  # the content-quality work lands here.
         state_machine.py         # stage transition helpers
       workers/
         celery_app.py            # Celery() instance, broker/backend config
@@ -771,6 +795,161 @@ the architecture doesn't box it out later:
    yours), the API-key auth in Section 12 needs to become real
    per-tenant auth + per-tenant quotas (Section 13) — flagged now so
    it's not a surprise rewrite later.
+
+================================================================================
+20. APPENDIX C: CONTENT-QUALITY SPEC — WHAT EACH STAGE MUST PRODUCE
+================================================================================
+[MIRRORED from how-to-standalone.txt Section 21 on 2026-11-05, after
+confirming Sections 1-19 here only ever covered orchestration (Celery/
+Redis/Postgres) and never specified output quality. This section is
+identical in substance between both documents on purpose: content
+quality is a property of what pipeline/*.py produces, not of how
+Celery/BackgroundTasks call it — so it applies unchanged regardless of
+which orchestration tier you build.]
+
+This section is the actual product spec. Sections 1-19 tell you how
+the pipeline runs; this tells you what "done" means for each stage so
+the output is a video that actually hooks and holds a viewer, not just
+a video that technically rendered. Treat every item below as a
+requirement to implement, not inspiration to keep in mind.
+
+--------------------------------------------------------------------------
+20.1  SCRIPT STAGE — structured beats, not a flat script string
+--------------------------------------------------------------------------
+The "script" stage's `job_stage_results.output_path` content (Section
+5) MUST contain distinct fields the downstream stages can address
+individually — not one block of prose for an LLM to re-parse later.
+Minimum schema:
+
+  {
+    "hook":            "1-2 sentences. Curiosity gap / bold claim /
+                         question. No throwaway intro ('Hi guys...').
+                         Must land in the first 1-2 spoken seconds.",
+    "setup":           "Minimum context needed, <= ~5s spoken.",
+    "payload_beats":   ["beat 1 text", "beat 2 text", ...],
+                        # ORDERED by escalating curiosity, front-loaded
+                        # value — the single best point comes EARLY,
+                        # not last. Most viewers won't reach "last."
+    "rehook_cues":      [{"after_beat": 1, "type": "stat_callout"},
+                          {"after_beat": 3, "type": "question"}],
+                        # a pattern-interrupt placed roughly every
+                        # 5-8s of runtime to survive the mid-video
+                        # retention valley
+    "payoff":          "The actual twist/value delivered. Must land
+                         before the viewer could have guessed it.",
+    "loop_line":       "Final line, written to connect back to `hook`
+                         (same phrase, a visual callback, or a direct
+                         restart cue) so playback looping reads as a
+                         restart, not an ending.",
+    "cta":             "Single ask. Placed after `payoff` only, never
+                         before — a CTA before payoff reads as spam.",
+    "target_duration_sec": 30
+  }
+
+PROMPT REQUIREMENT for `script_gen.py`: the LLM system prompt must
+explicitly instruct this structure and explicitly forbid intro fluff
+and multi-topic scripts (one idea per video — this section assumes
+that's enforced here, not fixed in editing later).
+
+--------------------------------------------------------------------------
+20.2  TTS STAGE — normalized loudness, known prosody limits
+--------------------------------------------------------------------------
+ - LOUDNESS NORMALIZATION is a required post-synthesis step, not
+   optional polish: normalize every synthesized audio file to a fixed
+   target (e.g. -14 LUFS) with `ffmpeg-normalize` or a manual two-pass
+   `loudnorm` ffmpeg filter. Without this, volume will vary job to
+   job and viewers reach for the volume dial — a direct retention
+   cost.
+ - KNOWN LIMITATION, carried over from the scan/Appendix B: Piper and
+   edge-tts have limited prosody/emphasis control. If a `payload_beat`
+   needs vocal emphasis on a specific word to land, the default TTS
+   stack cannot reliably deliver that. This is an accepted trade-off
+   for the free/local default, not a bug to silently work around — if
+   emphasis turns out to matter a lot once you have real output to
+   judge, that's the trigger to revisit TTS provider choice (not to
+   add complexity elsewhere to compensate).
+
+--------------------------------------------------------------------------
+20.3  CAPTIONS STAGE — two distinct caption layers, not one
+--------------------------------------------------------------------------
+ - LAYER 1 (per-word karaoke captions): generated from faster-whisper
+   word timestamps on the ACTUAL audio, as already specified in
+   Sections 3-6. Standard styling, smaller/consistent.
+ - LAYER 2 (hook/CTA text — NEW requirement): the `hook` and `cta`
+   fields from the script stage must be rendered as a SEPARATE,
+   visually distinct overlay (bigger/bolder/different color or
+   position) from the per-word captions — these are the lines doing
+   the most retention/conversion work and need to look like it, not
+   blend into the regular caption stream.
+ - SAFE-ZONE RULE (applies to both layers): nothing rendered in the
+   bottom ~20% or side ~5% margins of the 9:16 frame — that's where
+   platform UI (caption tray, like/comment/profile chips) sits and
+   will overlay/crop it. Make the safe-zone margins a config value in
+   `assembly.py`, not a hardcoded guess.
+
+--------------------------------------------------------------------------
+20.4  ASSETS STAGE — per-beat relevance, not per-video
+--------------------------------------------------------------------------
+ - Query Pexels/Pixabay PER `payload_beat` (using that beat's own
+   keywords), not once for the whole video — this was already implied
+   by "multi-scene asset sourcing" earlier in this document, but make
+   it explicit: the keyword used for each query should come directly
+   from the structured beat text in Section 20.1, so footage is
+   literally relevant to what's being said at that moment, not
+   generically topic-adjacent.
+ - AVOID VISUAL REPETITION: don't select near-identical clips/textures
+   for adjacent beats — track recently-used clip IDs/visual categories
+   within a job and bias selection away from repeats.
+
+--------------------------------------------------------------------------
+20.5  ASSEMBLY STAGE — where most of the new work lands
+--------------------------------------------------------------------------
+ - AUDIO DUCKING (new, required): background music must duck under
+   the voice track and rise in gaps. Implement via ffmpeg's
+   `sidechaincompress` filter (voice as the sidechain trigger, music
+   as the compressed signal) or, if that's too fiddly to get right
+   first pass, a simpler scripted volume-keyframe envelope keyed off
+   the voice track's amplitude. This is a mixing requirement, not a
+   nice-to-have — unducked background music under voice reads as
+   amateur and actively hurts comprehension.
+ - SFX ACCENTS (new, required): a small local library of short SFX
+   (whoosh/click/pop/ding) triggered on every scene-cut and every
+   hook/CTA text-pop. Cheap to build (a dozen royalty-free SFX files
+   is enough), disproportionate payoff for perceived production value.
+ - CUT CADENCE (new, required default): target a visual change (cut,
+   zoom, or pan) at least every 1-3 seconds. Use PySceneDetect output
+   and/or manual beat markers to drive this; cut POINTS must align to
+   word/breath boundaries from the Whisper timestamps already produced
+   in the captions stage — never cut mid-word.
+ - COLOR CONSISTENCY (new, required): apply ONE consistent LUT or
+   basic contrast/saturation/brightness normalization filter across
+   every sourced clip before compositing, so footage pulled from
+   different stock sources doesn't look jarringly inconsistent
+   shot-to-shot.
+ - LOOP-POINT HANDLING (new, required): the render step must support
+   trimming/crossfading the tail of the video so the `loop_line`
+   (Section 20.1) and the final frame flow back toward the opening
+   frame/sound on autoplay-loop — this is what turns platform
+   autoplay-looping into free rewatch signal instead of a jarring
+   restart.
+ - OPTIONAL NEW DEPENDENCY — `librosa`: if cuts should sync to a
+   background MUSIC beat rather than just speech/breath timing, add
+   `librosa` (beat/onset detection) to the assembly stage's toolset.
+   This was NOT in the original github-scan_reel-shorts-pipeline.txt
+   research (it wasn't in scope when that scan ran) — flag it there
+   too if you decide beat-synced cutting is worth the extra complexity.
+
+--------------------------------------------------------------------------
+20.6  WHY THIS LIVES HERE AND NOT JUST IN CHAT
+--------------------------------------------------------------------------
+Every item above is a concrete field, filter, or config value inside
+an existing stage from Sections 2-9 — none of it requires new
+architecture. That's deliberate: content quality is a property of
+WHAT `script_gen.py`/`tts.py`/`captions.py`/`assets.py`/`assembly.py`
+produce, not of how they're orchestrated (Celery/Redis/Postgres here,
+BackgroundTasks/JSON in how-to-standalone.txt), so it applies
+identically to both documents without touching either one's Sections
+1-19/1-20.
 
 ================================================================================
 END OF DOCUMENT — keep this file current as decisions are made;
