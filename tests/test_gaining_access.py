@@ -1,7 +1,6 @@
 import contextlib
 import io
 import os
-import shutil
 import sys
 import unittest
 
@@ -59,18 +58,10 @@ class GainingAccessTest(unittest.TestCase):
             "connection failed/dropped" in out or "sent ok" in out
         )
 
-    def test_phishing_provision_writes_template_files_only(self):
-        out_dir = "./_test_phishing_templates"
-        self.addCleanup(lambda: shutil.rmtree(out_dir, ignore_errors=True))
-        out = run_with(["3", "TestCo", out_dir])
-        self.assertIn("provision only, nothing is sent", out)
-        self.assertTrue(os.path.isfile(os.path.join(out_dir, "awareness_email_template.txt")))
-        self.assertTrue(os.path.isfile(os.path.join(out_dir, "awareness_login_mock.html")))
-        self.assertTrue(os.path.isfile(os.path.join(out_dir, "awareness_notes.md")))
-        with open(os.path.join(out_dir, "awareness_notes.md")) as fh:
-            notes = fh.read()
-        self.assertIn("not configured to send", notes)
-        self.assertIn("not configured to collect", notes)
+    def test_option_3_no_longer_exists(self):
+        # Phishing moved to the Social Engineering menu; option 3 here
+        # should now be invalid rather than running anything.
+        self.assertIn("Invalid option", run_with(["3"]))
 
 
 if __name__ == "__main__":

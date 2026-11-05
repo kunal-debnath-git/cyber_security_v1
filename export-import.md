@@ -35,10 +35,11 @@ Termux on Android, not a full Linux install, so there are two setups
 depending on what you've got:
 
 - **A: plain Termux** — fine for the Python side (menu loop, hashing,
-  tests) but most of the Kali *tools* the phases shell out to
-  (`whois`, `dig`, `nmap`, `macchanger`, `apt`, `systemctl`) either
-  aren't packaged for Termux or behave differently (no real `apt`, no
-  `systemd`).
+  tests, and Social Engineering's template/script/briefing generators,
+  which need no external tool) but most of the Kali *tools* the other
+  phases shell out to (`whois`, `dig`, `nmap`, `macchanger`, `apt`,
+  `systemctl`, `qrencode`) either aren't packaged for Termux or behave
+  differently (no real `apt`, no `systemd`).
 - **B: Kali inside Termux via `proot-distro`** (a Kali chroot) — closer
   to real Kali, has `apt`, and most of these tools install normally.
   `systemctl` still won't work (no systemd PID 1 in a chroot/proot
@@ -59,7 +60,7 @@ proot-distro install kali
 proot-distro login kali
 # you are now inside the Kali chroot for the rest of this section
 apt update && apt install -y git python3 python3-pip \
-    whois dnsutils nmap macchanger iproute2 net-tools
+    whois dnsutils nmap macchanger iproute2 net-tools qrencode
 ```
 
 (`dnsutils` provides `dig`; `iproute2` provides `ip`/`ss`; on some
@@ -86,7 +87,7 @@ git pull origin main
 python3 -m unittest discover -s tests -v
 ```
 
-Expect all tests to pass (41/41 as of the last review pass) regardless
+Expect all tests to pass (54/54 as of the last push) regardless
 of setup A or B — the tests are written to handle missing external
 tools gracefully, so they don't require `nmap`/`whois`/etc. to be
 installed to pass. A failure here means something broke in transit
@@ -99,8 +100,8 @@ expected) before digging further.
 python3 main.py
 ```
 
-Walk each implemented option (1–4) against something safe — your own
-device/loopback, or a target you've separately confirmed you're
+Walk each implemented option (1–4, 7) against something safe — your
+own device/loopback, or a target you've separately confirmed you're
 authorized to test — and confirm:
 
 - **1. General Task** — info report and hashing should just work on
@@ -115,6 +116,11 @@ authorized to test — and confirm:
   normal, not a bug. Every run still asks for the y/n authorization
   confirmation; answer only for a target you're actually authorized to
   test.
+- **7. Social Engineering** — no target, no authorization prompt; the
+  template/script/briefing generators work on setup A with no external
+  tool. Only the QR code generator needs `qrencode` (setup B, or
+  `pkg install qrencode` if available on Termux directly) — without it
+  it just prints the URL for you to encode elsewhere.
 
 ### 2e. Known Termux/proot-distro caveats
 

@@ -4,5 +4,5 @@ __pycache__/
 # Runtime output from the toolkit itself (not source) --
 # General Task > Session activity log
 activity.log
-# Gaining Access > Phishing (provision-only templates), default output dir
-phishing_templates/
+# Social Engineering > templates/scripts/briefings/QR output dir
+social_engineering_templates/

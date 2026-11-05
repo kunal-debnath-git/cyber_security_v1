@@ -8,6 +8,7 @@ container they were first written in does not have them installed.
 
 import shutil
 import subprocess
+from datetime import datetime, timezone
 
 
 def tool_available(name):
@@ -56,3 +57,21 @@ def prompt(prompt_text, input_fn=input, default=""):
         return default
     answer = answer.strip()
     return answer if answer else default
+
+
+def append_timestamped_log(path, note):
+    """Append a UTC-timestamped line to a local log file.
+
+    Shared by any phase that logs activity notes (General Task's
+    session log, Social Engineering's campaign log, ...), so they all
+    write the same format to the same kind of file. Returns the
+    formatted line on success, or None if the write failed.
+    """
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    line = f"{timestamp} {note}\n"
+    try:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(line)
+    except OSError:
+        return None
+    return line
