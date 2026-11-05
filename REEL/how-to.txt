@@ -1,0 +1,763 @@
+================================================================================
+HOW TO BUILD: PRODUCTION-READY REEL/SHORTS GENERATION PIPELINE
+Python + FastAPI backend
+================================================================================
+Status        : BUILD BLUEPRINT (go-to document — update this file as
+                 decisions change; don't let it go stale)
+Companion doc : REEL/github-scan_reel-shorts-pipeline.txt
+                 (the "WHAT to use" research — this file is the
+                 "HOW to put it together" plan. Read that one first
+                 if you haven't; this one assumes its conclusions.)
+Scope         : Content GENERATION only. Topic in -> rendered 9:16
+                 video out. No auto-posting/scheduling to platforms
+                 (that is a separate, later concern — see Section 14).
+Stack decided : FastAPI (API) + Celery/Redis (job queue) + Postgres
+                 (state) + Piper/edge-tts (TTS) + faster-whisper
+                 (captions) + moviepy v2/python-ffmpeg (assembly) +
+                 Pexels/Pixabay/Freesound (assets, hand-rolled httpx
+                 clients) + Docker (packaging).
+Note          : This is a SEPARATE system from the cyber_security_v1
+                 CLI toolkit that lives in the rest of this repo. The
+                 toolkit's "stdlib-only, no third-party packages" rule
+                 does NOT apply here — this pipeline is its own
+                 Python project/service and needs a normal dependency
+                 stack (FastAPI, Celery, moviepy, etc.). Keep it in
+                 its own subfolder/repo, don't mix it into phases/.
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+ 1. Design goals — what "production-ready" means here
+ 2. High-level architecture (diagram)
+ 3. Pipeline stages & job state machine
+ 4. API contract (FastAPI endpoints)
+ 5. Data model (Postgres schema)
+ 6. Project folder structure
+ 7. Queue & worker design (Celery/Redis)
+ 8. Storage strategy (local -> object storage)
+ 9. Containerization & deployment topology
+10. Configuration & secrets management
+11. Observability (logs, metrics, alerting)
+12. Security considerations
+13. Cost controls
+14. Out-of-scope-for-now: posting/scheduling (how to bolt it on later)
+15. Testing strategy
+16. CI/CD pipeline
+17. Phased build roadmap / milestone checklist  <-- START HERE WHEN BUILDING
+18. Appendix A: illustrative code skeletons
+19. Appendix B: open decisions / risks to revisit
+
+================================================================================
+1. DESIGN GOALS — WHAT "PRODUCTION-READY" MEANS HERE
+================================================================================
+A single-script generator ("run main.py, wait, get a video") is a demo.
+Production-ready means:
+
+ - ASYNC BY DEFAULT: video rendering/TTS/transcription are slow
+   (seconds to minutes). The API must never block a request thread on
+   them. Every generation request becomes a QUEUED JOB with a status
+   you can poll — never a synchronous HTTP response holding a video.
+ - RESUMABLE / IDEMPOTENT STAGES: each pipeline stage (script, TTS,
+   captions, assets, render) writes its output to a known path and
+   records completion in the DB. If a worker crashes mid-job, you
+   re-run only the failed stage, not the whole job.
+ - OBSERVABLE: you can answer "where is job X right now, and why did
+   it fail" without reading worker logs by hand.
+ - COST-BOUNDED: external LLM/TTS/stock-API calls and GPU time are
+   metered and capped per job and per day — a bug or abuse can't
+   produce an unbounded bill.
+ - HORIZONTALLY SCALABLE: the bottleneck (CPU-bound rendering, GPU-
+   bound Whisper/XTTS) can be scaled by adding worker processes/nodes
+   without touching the API layer.
+ - SECURE BY DEFAULT: user-supplied topics/prompts are untrusted input
+   flowing into an LLM and then into shell-adjacent tools (ffmpeg) —
+   treat both injection paths seriously (Section 12).
+ - REPRODUCIBLE: Docker image + pinned dependency versions + pinned
+   model/voice versions, so "it worked on my machine" doesn't happen.
+
+================================================================================
+2. HIGH-LEVEL ARCHITECTURE
+================================================================================
+
+                        +----------------------+
+                        |   Client / caller    |
+                        | (your own frontend,  |
+                        |  n8n, cron, etc.)     |
+                        +----------+-----------+
+                                   | HTTPS (REST)
+                                   v
+                        +----------------------+
+                        |     FastAPI app      |   <-- stateless, scales
+                        |  (uvicorn workers)    |       horizontally
+                        |  - POST /jobs         |
+                        |  - GET  /jobs/{id}    |
+                        |  - GET  /jobs/{id}/   |
+                        |         download      |
+                        +----------+-----------+
+                                   | enqueue task
+                                   v
+                        +----------------------+
+                        |   Redis (broker +    |
+                        |   result backend)    |
+                        +----------+-----------+
+                                   |
+                 +-----------------+------------------+
+                 v                 v                  v
+        +----------------+ +----------------+ +----------------+
+        | Celery worker  | | Celery worker  | | Celery worker  |
+        | pool: "light"  | | pool: "render" | | pool: "gpu"    |
+        | - script-gen   | | - moviepy/     | | - faster-      |
+        |   (LLM call)   | |   ffmpeg       | |   whisper      |
+        | - asset fetch  | |   assembly     | | - (optional)   |
+        |   (Pexels/     | | - CPU heavy,   | |   whisperX /   |
+        |   Pixabay/     | |   scale by     | |   XTTS if you  |
+        |   Freesound)   | |   core count   | |   add voice    |
+        | - TTS (Piper/  | |                | |   cloning      |
+        |   edge-tts)    | |                | |   later        |
+        +--------+-------+ +--------+-------+ +--------+-------+
+                 |                  |                   |
+                 +------------------+-------------------+
+                                    v
+                        +----------------------+
+                        |  Shared file storage  |
+                        |  (local volume for    |
+                        |  MVP -> S3/GCS/MinIO  |
+                        |  for multi-node later) |
+                        |  /data/jobs/{job_id}/  |
+                        +----------+-----------+
+                                   |
+                        +----------------------+
+                        |  Postgres (job state, |
+                        |  stage results, audit)|
+                        +----------------------+
+
+Key point: the API process and the worker processes are DIFFERENT
+deployables from day one, even if they run on the same VM for the
+MVP. This is what makes "scale the renderer" later a config change,
+not a rewrite.
+
+================================================================================
+3. PIPELINE STAGES & JOB STATE MACHINE
+================================================================================
+A job moves through a fixed sequence of stages. Model this explicitly
+as a state machine in the DB (Section 5), not as implicit control
+flow buried in one giant function.
+
+  QUEUED
+    -> SCRIPT_GENERATING   (LLM: topic -> {script, scenes[], title,
+                             hashtags, hook_text})
+    -> SCRIPT_DONE
+    -> AUDIO_SYNTHESIZING   (TTS: script -> audio.wav + duration)
+    -> AUDIO_DONE
+    -> TRANSCRIBING         (faster-whisper on audio.wav ->
+                             word-level timestamps -> captions.ass)
+    -> CAPTIONS_DONE
+    -> SOURCING_ASSETS      (per scene: query Pexels/Pixabay by
+                             keyword -> download candidate clips/
+                             images into assets/)
+    -> ASSETS_DONE
+    -> RENDERING            (moviepy/ffmpeg: audio + visuals +
+                             captions -> output.mp4, 9:16, target
+                             duration matched to audio length)
+    -> RENDER_DONE
+    -> COMPLETE              (final artifact + metadata ready to
+                             fetch via GET /jobs/{id}/download)
+
+  FAILED(stage, error)      — any stage can transition here; job
+                             keeps its last-good stage outputs so a
+                             retry resumes from the failed stage, not
+                             from QUEUED.
+
+Why this ordering: captions are generated from the ACTUAL TTS audio
+(not the raw script) so word timestamps match what's actually spoken
+(pacing varies by TTS engine/voice). Assets are sourced after the
+script is final so scene keywords are known, and can run in parallel
+with transcription since they don't depend on each other — only
+RENDERING needs all three (audio, captions, assets) done.
+
+Implement each stage as its own Celery task; chain them with
+`celery.chain()` / a small orchestrator task, not as one monolithic
+task — this is what gives you resumability and per-stage retry.
+
+================================================================================
+4. API CONTRACT (FastAPI)
+================================================================================
+Keep the public surface small and job-centric. Example:
+
+  POST /v1/jobs
+    body: {
+      "topic": "3 surprising facts about octopuses",
+      "target_duration_sec": 45,          # optional, default 30-60
+      "voice": "en_US-piper-default",     # optional, default voice
+      "platform_preset": "reels" | "shorts",  # sets 9:16 + duration cap
+      "caption_style": "karaoke" | "classic",
+      "llm_provider": "openai" | "anthropic" | "ollama"   # optional
+    }
+    -> 202 Accepted
+       { "job_id": "uuid", "status": "QUEUED",
+         "status_url": "/v1/jobs/{job_id}" }
+
+  GET /v1/jobs/{job_id}
+    -> 200
+       { "job_id": "...", "status": "RENDERING",
+         "stage_progress": { "script": "done", "audio": "done",
+                              "captions": "done", "assets": "done",
+                              "render": "in_progress" },
+         "created_at": "...", "updated_at": "...",
+         "error": null }
+
+  GET /v1/jobs/{job_id}/download
+    -> 200 (video/mp4 stream) if status == COMPLETE
+    -> 409 if not ready yet
+    -> 404 if job_id unknown/expired (see retention policy, Sec. 8)
+
+  GET /v1/jobs/{job_id}/metadata
+    -> 200 { "title": "...", "description": "...", "hashtags": [...],
+             "duration_sec": 47.3, "script": "..." }
+    (useful even though posting is out of scope — you still want the
+     generated title/caption text available to copy-paste manually)
+
+  DELETE /v1/jobs/{job_id}
+    -> 204, deletes job artifacts early (storage reclaim)
+
+  GET /v1/health
+    -> 200 { "status": "ok", "redis": "ok", "db": "ok" }
+    (used by your container orchestrator's liveness probe)
+
+Versioning: prefix with /v1 from day one. You WILL change the job
+schema later; don't make that a breaking change for existing callers.
+
+Auth: even for a personal/internal tool, put a simple API-key header
+check in front of POST/DELETE from the start (Section 12) — it's a
+five-line FastAPI dependency now, a scramble later once something
+else depends on this service.
+
+================================================================================
+5. DATA MODEL (Postgres)
+================================================================================
+  TABLE jobs
+    id              UUID PRIMARY KEY
+    status          TEXT NOT NULL   -- enum, see Section 3
+    topic           TEXT NOT NULL
+    params          JSONB           -- the full request body, for replay/debug
+    current_stage   TEXT
+    error_message   TEXT
+    error_stage     TEXT
+    retry_count     INT DEFAULT 0
+    created_at      TIMESTAMPTZ DEFAULT now()
+    updated_at      TIMESTAMPTZ DEFAULT now()
+    expires_at      TIMESTAMPTZ     -- for retention/cleanup (Sec. 8)
+
+  TABLE job_stage_results
+    id              UUID PRIMARY KEY
+    job_id          UUID REFERENCES jobs(id)
+    stage           TEXT NOT NULL   -- "script" | "audio" | "captions" |
+                                     -- "assets" | "render"
+    status          TEXT NOT NULL   -- "done" | "failed"
+    output_path     TEXT            -- relative path under job's storage dir
+    metadata         JSONB          -- e.g. {"duration_sec": 47.3} for audio,
+                                     -- {"scene_count": 5} for assets
+    started_at      TIMESTAMPTZ
+    finished_at     TIMESTAMPTZ
+    error           TEXT
+
+  TABLE asset_usage           -- track third-party asset provenance for
+                               -- license/attribution compliance (Sec. 12)
+    id              UUID PRIMARY KEY
+    job_id          UUID REFERENCES jobs(id)
+    provider        TEXT       -- "pexels" | "pixabay" | "freesound"
+    source_url      TEXT
+    license_note    TEXT       -- attribution string if required
+    downloaded_at   TIMESTAMPTZ
+
+  TABLE api_usage              -- cost tracking (Sec. 13)
+    id              UUID PRIMARY KEY
+    job_id          UUID REFERENCES jobs(id)
+    provider        TEXT       -- "openai" | "anthropic" | "pexels" | etc.
+    tokens_or_units INT
+    estimated_cost_usd NUMERIC(10,4)
+    created_at      TIMESTAMPTZ DEFAULT now()
+
+Use Alembic (SQLAlchemy migrations) from the very first schema —
+retrofitting migrations onto a schema-less "just CREATE TABLE in a
+script" setup is painful later.
+
+================================================================================
+6. PROJECT FOLDER STRUCTURE
+================================================================================
+  reel-pipeline/
+    app/
+      main.py                 # FastAPI app factory, mounts routers
+      api/
+        routes/jobs.py         # the endpoints in Section 4
+        deps.py                # API-key auth dependency, DB session dep
+      core/
+        config.py              # pydantic Settings (env-driven, Sec. 10)
+        logging.py              # structured logging setup
+      pipeline/
+        script_gen.py           # LLM call -> script/title/hashtags
+        tts.py                   # Piper/edge-tts wrapper, provider-agnostic
+        captions.py              # faster-whisper -> word timestamps -> .ass
+        assets.py                # Pexels/Pixabay/Freesound httpx clients
+        assembly.py              # moviepy/ffmpeg render
+        state_machine.py         # stage transition helpers
+      workers/
+        celery_app.py            # Celery() instance, broker/backend config
+        tasks.py                 # one task per stage + orchestrator chain
+      models/
+        db.py                    # SQLAlchemy models (Section 5)
+        schemas.py               # pydantic request/response models
+      storage/
+        paths.py                 # job_dir(job_id), stage output path helpers
+        backend.py               # local-disk impl now, S3/GCS impl later,
+                                  # same interface (Section 8)
+    migrations/                  # Alembic
+    tests/
+      unit/                      # per-module, mock external calls
+      integration/                # full pipeline on a stub topic, all
+                                  # external APIs mocked/recorded (VCR-style)
+    docker/
+      Dockerfile.api
+      Dockerfile.worker
+      docker-compose.yml
+      docker-compose.prod.yml
+    .env.example
+    pyproject.toml / requirements.txt
+    README.md
+
+Keep this as its OWN top-level project (e.g. a sibling folder or
+separate repo), not nested inside phases/ of cyber_security_v1 — it's
+unrelated in purpose, language-dependency policy, and deployment
+target.
+
+================================================================================
+7. QUEUE & WORKER DESIGN (Celery/Redis)
+================================================================================
+ - Broker + result backend: Redis (simplest ops burden for an MVP;
+   RabbitMQ if you later need stricter delivery guarantees).
+ - THREE WORKER POOLS from day one, even on one machine, via Celery
+   queues/routing — because they have different resource profiles:
+     "light"  : script-gen (network-bound LLM call), asset-sourcing
+                (network-bound HTTP), TTS if using Piper/edge-tts
+                (CPU-light). High concurrency (e.g. 8-16 threads/procs).
+     "render" : moviepy/ffmpeg assembly. CPU-bound, heavy. Concurrency
+                = CPU core count, no more (oversubscribing tanks
+                throughput for CPU-bound ffmpeg work).
+     "gpu"    : faster-whisper/whisperX transcription (and XTTS if you
+                add voice cloning later). Concurrency = 1 per GPU
+                unless the model fits multiple instances in VRAM.
+ - Retries: each task gets `autoretry_for=(RequestException, ...)`
+   with exponential backoff + jitter for the network-bound stages
+   (LLM/TTS/stock-API rate limits are the normal failure mode, not the
+   exception). Cap retries (e.g. 3) then transition the job to FAILED
+   with the real error recorded, not silently stuck "in progress."
+ - Idempotency: each task checks `job_stage_results` for an existing
+   "done" row for its stage before redoing work — safe to re-enqueue
+   a job without double-billing an LLM call.
+ - Timeouts: set a hard `time_limit` per task (e.g. 10 min for render,
+   2 min for script-gen) so one stuck job can't hold a worker slot
+   forever.
+ - Orchestration: either (a) a single Celery `chain()` per job built
+   at enqueue time, or (b) each task enqueues the next stage itself on
+   success (more flexible for conditional branches, e.g. skip
+   asset-sourcing if the caller supplied their own footage). Start
+   with (a); move to (b) only if you need branching.
+
+================================================================================
+8. STORAGE STRATEGY
+================================================================================
+ Layout (same on local disk or object storage):
+   /data/jobs/{job_id}/
+     request.json          # the original POST body, for replay
+     script.json            # {script, title, hashtags, scenes[]}
+     audio.wav
+     captions.ass
+     assets/
+       scene_0.mp4
+       scene_1.jpg
+       ...
+     output.mp4
+     thumbnail.jpg
+     manifest.json          # stage timings, asset provenance, versions
+                             # of every tool/model used (for repro/debug)
+
+ MVP: a local Docker volume mounted into both API and worker
+ containers (fine for single-node). Production/multi-node: swap the
+ `storage/backend.py` implementation for S3/GCS/MinIO behind the same
+ interface (`save(job_id, relpath, bytes)`, `open(job_id, relpath)`,
+ `url_for(job_id, relpath, expires_in)`) — nothing above that
+ interface should know which backend is active.
+
+ RETENTION: set `jobs.expires_at` on creation (e.g. now + 7 days).
+ A scheduled Celery beat task deletes expired job directories + rows
+ nightly. Without this, storage cost grows unbounded — decide the
+ retention window deliberately, don't let it be "forever by accident."
+
+================================================================================
+9. CONTAINERIZATION & DEPLOYMENT TOPOLOGY
+================================================================================
+ Dockerfile notes:
+   - `apt-get install -y ffmpeg` is required in BOTH the api image
+     (if it ever touches media, e.g. thumbnailing) and the worker
+     image (definitely, for moviepy/python-ffmpeg) — none of the
+     Python wrappers bundle the ffmpeg binary.
+   - Pin versions: moviepy==2.x (the breaking v1->v2 rewrite matters,
+     see github-scan_reel-shorts-pipeline.txt Section 5), faster-
+     whisper, piper-tts, etc. — exact pins in requirements.txt/
+     pyproject.toml, rebuild-tested, not "latest."
+   - If using GPU workers (faster-whisper/XTTS on GPU): separate
+     `Dockerfile.worker-gpu` based on an nvidia/cuda base image; keep
+     the CPU "render" and "light" workers on a plain python:3.x-slim
+     base — don't force CUDA deps onto workers that don't need them.
+
+ docker-compose.yml (MVP, single machine):
+   services: api, worker-light, worker-render, worker-gpu (optional),
+   redis, postgres, (optional) nginx/traefik as reverse proxy +
+   TLS termination in front of the API.
+
+ Scaling path (when single-node isn't enough):
+   1. Move Postgres/Redis to managed services (RDS/Cloud SQL,
+      ElastiCache/Memorystore) — stop running stateful services in
+      the same compose file as your app.
+   2. Move object storage to S3/GCS/MinIO (Section 8).
+   3. Deploy api + each worker pool as separate services on
+      ECS/Fargate or Kubernetes, scaled independently:
+        - api: scale on request rate/CPU
+        - worker-render: scale on Celery queue depth (CPU-bound,
+          this is usually your real bottleneck — scale this first)
+        - worker-gpu: scale on queue depth, bounded by GPU
+          availability/cost
+   4. Add a Celery queue-depth-based autoscaler (KEDA on k8s, or a
+      simple cron script checking `celery inspect` queue lengths on
+      ECS) rather than fixed worker counts.
+
+================================================================================
+10. CONFIGURATION & SECRETS MANAGEMENT
+================================================================================
+ - `core/config.py`: a single pydantic `Settings(BaseSettings)` class,
+   loaded from environment variables (`.env` for local dev only, real
+   secrets manager — AWS Secrets Manager/GCP Secret Manager/Vault —
+   in any deployed environment). Fields: LLM provider API keys,
+   PEXELS_API_KEY, PIXABAY_API_KEY, FREESOUND_API_KEY, DATABASE_URL,
+   REDIS_URL, API_AUTH_KEY, JOB_RETENTION_DAYS, MAX_JOBS_PER_DAY, etc.
+ - NEVER commit `.env` with real keys — `.env.example` with
+   placeholder values only, real `.env` in `.gitignore`.
+ - Per-provider feature flags: since the research found many
+   alternative providers for each stage (multiple LLMs, multiple TTS
+   engines), make the provider selectable via config/per-request
+   param, not hardcoded — this is what lets you swap Piper for
+   edge-tts, or OpenAI for Ollama, without a code change.
+
+================================================================================
+11. OBSERVABILITY
+================================================================================
+ - Structured logging (JSON lines) with `job_id` on every log line
+   from every stage — this is what makes "what happened to job X"
+   answerable by grepping logs instead of guessing.
+ - Celery task events -> exported as metrics (task duration, success/
+   failure count, queue depth per queue) via `celery-prometheus-
+   exporter` or similar; scrape with Prometheus, dashboard in Grafana.
+ - Minimum alerts to set up before calling this "production":
+     - queue depth on "render" queue growing unbounded (worker
+       starvation or stuck jobs)
+     - job failure rate above a threshold over a rolling window
+     - external API error rate (LLM/Pexels/Pixabay) spiking
+       (signals a provider outage or a revoked/rate-limited key)
+     - disk/storage usage approaching capacity
+ - Error tracking (Sentry or similar) wired into both the FastAPI app
+   and the Celery workers — uncaught exceptions in a background task
+   are otherwise invisible until a user complains a job never
+   finished.
+
+================================================================================
+12. SECURITY CONSIDERATIONS
+================================================================================
+ - API AUTH: require an API key (or JWT if multi-tenant later) on all
+   mutating endpoints from day one (Section 4).
+ - RATE LIMITING: per-key rate limit on POST /jobs (e.g. slowapi /
+   a Redis-backed token bucket) — this is also your primary cost
+   control (Section 13).
+ - PROMPT INJECTION: the `topic` field flows into an LLM prompt. Treat
+   it as untrusted: use a system prompt that clearly separates
+   instructions from user content, don't let the LLM's output be
+   executed as code/shell anywhere downstream, and validate/sanitize
+   anything the LLM returns before it's used to build a filename or
+   shell/ffmpeg argument (next point).
+ - COMMAND INJECTION VIA FFMPEG: if any stage shells out to ffmpeg
+   with string-interpolated arguments (filenames, filter strings
+   derived from LLM output), build argument LISTS (subprocess with
+   `shell=False`, explicit arg arrays) — never an interpolated shell
+   string. This applies to python-ffmpeg/moviepy calls too: treat any
+   LLM-derived text that ends up in a filter_complex string as
+   untrusted.
+ - CONTENT MODERATION: since script text is LLM-generated from
+   arbitrary user topics, consider a moderation pass (OpenAI
+   moderation endpoint, or a local classifier) before TTS/render if
+   this will ever be exposed to other users — cheap insurance against
+   generating something you don't want to have produced.
+ - THIRD-PARTY ASSET LICENSING: Pexels/Pixabay/Freesound each have
+   their own attribution/usage terms (see asset_usage table, Sec. 5).
+   Record provenance per job so you can prove compliance later, and
+   surface attribution strings in the metadata endpoint if the
+   license requires display-with-attribution.
+ - DEPENDENCY LICENSE CHECK: OHF-Voice/piper1-gpl (the actively
+   maintained Piper fork) is GPL-3.0 — confirm that's acceptable
+   before shipping it inside a closed-source service; see
+   github-scan_reel-shorts-pipeline.txt Section "CROSS-CUTTING FLAGS."
+ - SECRETS: never log API keys; redact them in structured logs and
+   error reports (Sentry scrubbing rules).
+ - SSRF: if `assets.py` ever accepts a user-supplied image/video URL
+   (e.g. "use my own footage") rather than only querying Pexels/
+   Pixabay by keyword, validate/allowlist the domain before fetching
+   — don't let a job fetch arbitrary internal URLs.
+
+================================================================================
+13. COST CONTROLS
+================================================================================
+ - Per-job budget: cap LLM tokens per script-gen call (max script
+   length), cap number of asset-sourcing API calls per job (one query
+   per scene, not per candidate retry).
+ - Per-day/per-key quota: `MAX_JOBS_PER_DAY` enforced at the API layer
+   before a job is even enqueued — stops a bug or runaway caller from
+   generating thousands of jobs overnight.
+ - Cache aggressively: identical TTS text -> cache the audio by a hash
+   of (text, voice); identical Pexels/Pixabay keyword query -> cache
+   results for e.g. 24h. This cuts both cost and latency on retries/
+   similar topics.
+ - Track real cost per job (api_usage table, Section 5) — tokens for
+   LLM calls, request counts for stock APIs, compute-seconds for
+   render/transcription — so "what does one video actually cost us"
+   is a query, not a guess, before you scale volume.
+ - Prefer free/local-first providers as the DEFAULT (Piper over a paid
+   TTS API, faster-whisper on CPU over a paid transcription API,
+   Pexels/Pixabay free tier over a paid stock-footage API) and make
+   paid alternatives opt-in per request — this was the overall finding
+   of the GitHub scan: free/local options are mature enough to be the
+   default for every stage of this pipeline.
+
+================================================================================
+14. OUT OF SCOPE FOR NOW: POSTING/SCHEDULING
+================================================================================
+Deliberately not designed here (per your stated scope), but noted so
+the architecture doesn't box it out later:
+ - Would be its own stage AFTER `COMPLETE`, driven by Instagram Graph
+   API / YouTube Data API credentials, as a separate Celery task
+   ("publish") with its own state machine and its own authorization/
+   confirmation gate before anything goes live — consistent with how
+   this repo's cyber_security_v1 toolkit gates any target-touching
+   action behind an explicit y/n confirmation; the same pattern is
+   worth reusing here (require an explicit "publish" call on a
+   COMPLETE job, never auto-publish on render success).
+ - When you do build it: do NOT follow the pattern flagged in the
+   scan report where tools auto-upload via scraped/unofficial session
+   cookies (purffle-shorts, FujiwaraChoki/MoneyPrinter both do this).
+   Use each platform's official API with your own registered app
+   credentials and documented ToS-compliant upload flow.
+
+================================================================================
+15. TESTING STRATEGY
+================================================================================
+ - UNIT: each `pipeline/*.py` module tested in isolation with external
+   calls mocked (LLM client, httpx calls to Pexels/Pixabay, TTS
+   subprocess) — fast, run on every commit.
+ - INTEGRATION: one end-to-end test that runs the full chain on a
+   fixed stub topic with ALL external APIs mocked/recorded (e.g.
+   `vcrpy` cassettes for HTTP calls, a canned LLM response) so it's
+   deterministic and free to run in CI, asserting the final
+   output.mp4 exists and has the expected rough duration.
+ - SMOKE/LOAD: a separate, manually-triggered test that hits real
+   external APIs with a real small job, run before releases, not on
+   every CI run (keeps CI fast and avoids burning API quota per
+   commit).
+ - WORKER FAILURE INJECTION: at least one test that kills a task mid-
+   stage and asserts the job resumes from the failed stage on retry,
+   not from scratch — this proves the idempotency design in Section 7
+   actually holds.
+
+================================================================================
+16. CI/CD PIPELINE
+================================================================================
+ - GitHub Actions (or equivalent): lint (ruff/flake8) + unit tests on
+   every push/PR; integration tests (mocked) on every push to main;
+   build both Docker images (api, worker) and push to a registry on
+   tag/release.
+ - Migrations: run `alembic upgrade head` as a release step before
+   the new app version receives traffic, not as a manual ad-hoc step.
+ - Deploy: rolling/blue-green for the API (stateless, safe to roll);
+   for workers, let in-flight Celery tasks drain on the old version
+   before terminating it (`celery worker --max-tasks-per-child` /
+   graceful shutdown with `SIGTERM` + warm shutdown timeout) so a
+   deploy doesn't kill a job mid-render.
+
+================================================================================
+17. PHASED BUILD ROADMAP / MILESTONE CHECKLIST  <-- START HERE
+================================================================================
+ Treat each phase as a merge-able, demoable milestone. Don't jump
+ ahead — each phase deliberately defers the next phase's complexity.
+
+ PHASE 0 — Environment & skeleton
+   [ ] New project folder (Section 6), virtualenv/poetry, FastAPI
+       "hello world" + /v1/health endpoint.
+   [ ] Dockerfile.api builds and runs.
+   [ ] Repo/CI skeleton: lint + empty test suite passing in CI.
+
+ PHASE 1 — Synchronous MVP (prove the pipeline works at all)
+   [ ] One hardcoded LLM provider, one TTS (Piper), no captions yet,
+       ONE stock-footage call, moviepy assembly — all called
+       SYNCHRONOUSLY inside a single script/endpoint, local disk only.
+   [ ] Manually verify: topic in -> playable 9:16 mp4 out.
+   [ ] This phase is allowed to be ugly/monolithic — it exists to
+       de-risk the hardest integration (moviepy/ffmpeg assembly)
+       before you add async/queueing complexity on top of it.
+
+ PHASE 2 — Async job model
+   [ ] Add Postgres + `jobs`/`job_stage_results` tables + Alembic.
+   [ ] Add Redis + Celery; convert Phase 1's script into one Celery
+       task per stage, chained.
+   [ ] POST /v1/jobs returns 202 + job_id; GET /v1/jobs/{id} polls
+       real state from the DB.
+   [ ] Idempotency check per stage (Section 7) implemented and tested
+       with the failure-injection test (Section 15).
+
+ PHASE 3 — Full pipeline quality
+   [ ] Add faster-whisper captioning stage (word-level timestamps ->
+       .ass karaoke captions), inserted between AUDIO_DONE and
+       RENDERING per Section 3's ordering.
+   [ ] Multi-scene asset sourcing: script stage returns scene[]
+       breakdown with keywords; assets stage queries Pexels/Pixabay
+       per scene, not once for the whole video.
+   [ ] Metadata generation (title/description/hashtags) added to the
+       script-gen stage output; GET /v1/jobs/{id}/metadata works.
+   [ ] Provider abstraction (Section 10): swap TTS/LLM provider via
+       config without code changes; prove it by running the same
+       topic through two different providers.
+
+ PHASE 4 — Hardening
+   [ ] API key auth + rate limiting (Section 12) on all endpoints.
+   [ ] Retention policy + cleanup beat task (Section 8).
+   [ ] Cost tracking table populated per job (Section 13); per-day
+       quota enforced.
+   [ ] Structured logging with job_id everywhere; Sentry wired in.
+   [ ] Input validation + the ffmpeg-argument-list rule (Section 12)
+       audited across every subprocess call.
+
+ PHASE 5 — Deployment & scale
+   [ ] docker-compose.prod.yml with managed Postgres/Redis endpoints
+       (not containers you manage yourself).
+   [ ] Object storage backend swapped in (S3/GCS/MinIO) behind the
+       same storage interface; MVP local-disk code deleted or kept
+       only for local dev via a flag.
+   [ ] Separate worker pools deployed independently (Section 9);
+       queue-depth-based scaling configured for the render queue.
+   [ ] Prometheus/Grafana dashboards + the four alerts in Section 11
+       actually firing-tested (break something on purpose, confirm
+       the alert fires).
+
+ PHASE 6 — (Later, separate effort) Publishing
+   [ ] Only start this after Phase 5 is stable in production. See
+       Section 14 — new stage, new state machine, official platform
+       APIs only, explicit publish confirmation gate.
+
+================================================================================
+18. APPENDIX A: ILLUSTRATIVE CODE SKELETONS
+================================================================================
+(Illustrative only — not drop-in production code. Shows shape/wiring,
+ not full error handling.)
+
+--- app/api/routes/jobs.py --------------------------------------------------
+  from fastapi import APIRouter, Depends, HTTPException
+  from app.models.schemas import JobCreateRequest, JobStatusResponse
+  from app.workers.tasks import run_pipeline
+  from app.api.deps import require_api_key, get_db
+
+  router = APIRouter(prefix="/v1/jobs", dependencies=[Depends(require_api_key)])
+
+  @router.post("", status_code=202)
+  def create_job(req: JobCreateRequest, db=Depends(get_db)):
+      job = create_job_row(db, topic=req.topic, params=req.dict())
+      run_pipeline.delay(job_id=str(job.id))      # enqueue, return immediately
+      return {"job_id": job.id, "status": job.status,
+              "status_url": f"/v1/jobs/{job.id}"}
+
+  @router.get("/{job_id}", response_model=JobStatusResponse)
+  def get_job(job_id: str, db=Depends(get_db)):
+      job = fetch_job(db, job_id)
+      if not job:
+          raise HTTPException(404)
+      return job_to_status_response(job)
+
+--- app/workers/tasks.py (orchestration sketch) ------------------------------
+  from celery import chain
+  from app.workers.celery_app import app
+
+  @app.task(bind=True, autoretry_for=(Exception,), max_retries=3,
+            default_retry_delay=10)
+  def stage_script(self, job_id: str):
+      if stage_already_done(job_id, "script"):   # idempotency check
+          return
+      result = generate_script(job_id)            # pipeline/script_gen.py
+      save_stage_result(job_id, "script", result)
+
+  # ... stage_audio, stage_captions, stage_assets analogous ...
+
+  @app.task(bind=True, autoretry_for=(Exception,), max_retries=2,
+            time_limit=600)
+  def stage_render(self, job_id: str):
+      if stage_already_done(job_id, "render"):
+          return
+      assemble_video(job_id)                        # pipeline/assembly.py
+      mark_job_complete(job_id)
+
+  def run_pipeline(job_id: str):
+      # assets can run in parallel with captions; render waits on both
+      chain(
+          stage_script.s(job_id),
+          stage_audio.s(job_id),
+          celery.group(stage_captions.s(job_id), stage_assets.s(job_id)),
+          stage_render.s(job_id),
+      ).apply_async()
+
+--- app/pipeline/assembly.py (ffmpeg argument-list rule, Sec. 12) -----------
+  import subprocess
+
+  def burn_captions(video_path: str, ass_path: str, out_path: str) -> None:
+      # GOOD: explicit argument list, no shell string interpolation
+      cmd = ["ffmpeg", "-y", "-i", video_path,
+             "-vf", f"ass={ass_path}", "-c:a", "copy", out_path]
+      subprocess.run(cmd, check=True, shell=False)
+      # NEVER: subprocess.run(f"ffmpeg -i {video_path} ...", shell=True)
+      #        when any part of the string can contain LLM-derived text.
+
+================================================================================
+19. APPENDIX B: OPEN DECISIONS / RISKS TO REVISIT
+================================================================================
+ - Piper's actively-maintained fork is GPL-3.0 — decide now whether
+   that's acceptable for this project's distribution model, or budget
+   time to swap to edge-tts (unofficial API risk) / a GPU-based
+   Coqui-fork voice instead. Don't discover this license question
+   after the pipeline is built around Piper.
+ - No actively-maintained "karaoke caption burn-in" library exists
+   (confirmed in the scan) — budget real engineering time for the
+   `pipeline/captions.py` ASS-generation-from-word-timestamps code;
+   this is bespoke work, not a library you can `pip install` and move
+   on from.
+ - Decide CPU vs GPU for faster-whisper early — it changes the worker
+   Docker base image, hosting cost, and deployment topology
+   (Section 9). CPU is fine for low volume; GPU matters once job
+   volume or `target_duration_sec` grows.
+ - Revisit whether MoneyPrinterTurbo's code is worth vendoring/
+   adapting directly vs. this blueprint's clean-room build — vendoring
+   is faster to a first working pipeline but inherits its complexity
+   and mixed-language docs; clean-room (this roadmap) is slower but
+   you understand and control every stage. Pick deliberately, don't
+   default into a half-vendored mess.
+ - If this ever becomes multi-tenant (other people's jobs, not just
+   yours), the API-key auth in Section 12 needs to become real
+   per-tenant auth + per-tenant quotas (Section 13) — flagged now so
+   it's not a surprise rewrite later.
+
+================================================================================
+END OF DOCUMENT — keep this file current as decisions are made;
+treat Section 17's checkboxes as the living source of truth for
+"what's actually built" vs. "what's still planned."
+================================================================================
